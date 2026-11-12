@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="es-CL">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Induplac · Ingreso</title>
+  <link rel="stylesheet" href="css/styles.css">
+</head>
+<body class="pagina-entrada">
+  <main class="entrada">
+    <div class="marca marca-grande">
+      <svg class="logo" viewBox="0 0 32 32" aria-hidden="true">
+        <rect x="3" y="5" width="20" height="5" rx="1" fill="#17A9C9"/>
+        <rect x="6" y="13.5" width="20" height="5" rx="1" fill="#1E5FBF"/>
+        <rect x="9" y="22" width="20" height="5" rx="1" fill="#E9EEF6"/>
+      </svg>
+      <h1>Induplac</h1>
+    </div>
+    <p class="entrada-frase">Consumos e indicadores de la Oficina RM y la Planta Valparaíso, en tiempo real y con alertas tempranas.</p>
+
+    <h2 class="entrada-subtitulo">Elige tu perfil</h2>
+    <div id="perfiles" class="perfiles"></div>
+
+    <p class="aviso">Acceso de demostración: no se solicita contraseña. La autenticación real se incorpora en una etapa posterior.</p>
+  </main>
+  <footer class="pie-entrada">Proyecto académico SIY6122 · Duoc UC</footer>
+  <script>
+    // Abierto como archivo (file://) los módulos ES no cargan: avisar en vez de mostrar una página vacía.
+    if (location.protocol === 'file:') document.body.innerHTML = '<p class="aviso-file">Abre esta página con un servidor: en la carpeta <code>frontend</code> ejecuta <code>python -m http.server 8000</code> y entra a <code>http://localhost:8000</code>.</p>';
+  </script>
+  <script type="module" src="js/inicio.js"></script>
+</body>
+</html>
