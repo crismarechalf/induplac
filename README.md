@@ -24,6 +24,8 @@ cp .env.example .env      # y cambiar las claves
 docker compose up -d --build
 ```
 
+`JWT_SECRET` es obligatorio (32 caracteres o más): sin él la API no arranca. Para generar uno: `python -c "import secrets; print(secrets.token_urlsafe(48))"`.
+
 - Dashboard: <http://localhost:8000> (en EC2: `http://IP-PUBLICA:8000`; abrir el puerto 8000 en el security group)
 - Documentación de la API (Swagger): <http://localhost:8000/docs>
 - Salud del sistema: <http://localhost:8000/api/salud>

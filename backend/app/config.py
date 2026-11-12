@@ -11,8 +11,11 @@ def _int(nombre: str, defecto: int) -> int:
 
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./induplac.db")
 
-# JWT que firma los tokens entregados a los gateways.
-JWT_SECRET = os.getenv("JWT_SECRET", "solo-desarrollo-cambiar-en-produccion-0000")
+# JWT que firma los tokens entregados a los gateways. Obligatorio y sin valor por defecto:
+# con una clave conocida cualquiera podría firmar tokens y enviar lotes a nombre de una sede.
+JWT_SECRET = os.getenv("JWT_SECRET", "")
+if len(JWT_SECRET) < 32 or JWT_SECRET.startswith("cambiar"):  # "cambiar..." = valor de .env.example
+    raise RuntimeError("Falta JWT_SECRET, tiene menos de 32 caracteres o es el de ejemplo: defínelo en .env")
 JWT_MINUTOS = _int("JWT_MINUTOS", 60)
 
 # Credencial de cada gateway: id -> (sede, secreto).

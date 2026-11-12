@@ -6,6 +6,7 @@ import tempfile
 _tmp = tempfile.mkdtemp()
 os.environ["DATABASE_URL"] = os.getenv("TEST_DATABASE_URL", f"sqlite:///{_tmp}/test.db")
 os.environ["FRONTEND_DIR"] = os.path.join(_tmp, "sin_frontend")
+os.environ.setdefault("JWT_SECRET", "x" * 40)  # clave solo para las pruebas
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
 import pytest  # noqa: E402
