@@ -2,7 +2,7 @@
 
 // PUNTO DE CAMBIO EVA 3: cambiar a 'api' para leer del backend FastAPI real.
 // 'mock' usa el simulador local (js/simulator.js) y habilita el panel de demo.
-export const DATA_SOURCE = 'mock';
+export const DATA_SOURCE = 'api';
 
 // URL base de la API. Vacía = mismo origen (FastAPI servirá este frontend como estáticos).
 // Si la API vive en otro dominio, ej.: 'https://api.induplac.cl'

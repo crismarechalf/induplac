@@ -1,0 +1,6 @@
+# Falsos positivos revisados a mano (formato: commit:archivo:regla:línea).
+# .env.example solo trae valores de ejemplo ("cambiar-por-..."); los secretos reales van en .env, que no se sube.
+97b1f76007d3faa25eea50d7de87687660620c0b:.env.example:generic-api-key:3
+# Clave JWT de desarrollo que config.py traía por defecto en el primer commit; ya se eliminó
+# (ahora JWT_SECRET es obligatorio), pero gitleaks revisa todos los commits del PR.
+97b1f76007d3faa25eea50d7de87687660620c0b:backend/app/config.py:generic-api-key:15
