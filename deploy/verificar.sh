@@ -65,11 +65,25 @@ for sede in oficina_rm planta; do
 done
 if [[ -z "$viejas" ]]; then ok "Las 2 sedes enviaron un lote hace menos de 30 s"; else mal "Lotes recientes" "sin lotes: $viejas(¿panel Demo con una sede desconectada? ver: docker compose logs gateway-planta gateway-rm)"; fi
 
-# 6. API de simulación (panel Demo)
-if curl -fsS --max-time 10 http://localhost:8000/api/simulacion > /dev/null 2>&1; then
-  ok "API de simulación responde (/api/simulacion)"
+# 6. Login del administrador (credenciales del .env; DEMO_* = alias de la versión anterior)
+admin_usuario=$(leer_env ADMIN_USUARIO); admin_usuario=${admin_usuario:-$(leer_env DEMO_USUARIO)}; admin_usuario=${admin_usuario:-admin}
+admin_clave=$(leer_env ADMIN_CLAVE); admin_clave=${admin_clave:-$(leer_env DEMO_CLAVE)}
+cuerpo=$(ADMIN_U="$admin_usuario" ADMIN_C="$admin_clave" python3 -c 'import json, os; print(json.dumps({"usuario": os.environ["ADMIN_U"], "clave": os.environ["ADMIN_C"]}))')
+respuesta=$(curl -sS --max-time 10 -w '
+%{http_code}' -H 'Content-Type: application/json' -d "$cuerpo" http://localhost:8000/api/auth/login 2>/dev/null)
+codigo=$(tail -n 1 <<< "$respuesta")
+token=$(head -n -1 <<< "$respuesta" | python3 -c 'import json, sys; print(json.load(sys.stdin)["access_token"])' 2>/dev/null)
+if [[ "$codigo" == 200 && -n "$token" ]]; then
+  ok "Login del administrador ($admin_usuario)"
 else
-  mal "API de simulación" "/api/simulacion no responde"
+  mal "Login del administrador" "POST /api/auth/login respondió ${codigo:-nada} (¿cambió la clave? 429 = bloqueado 5 min por intentos fallidos)"
+fi
+
+# 7. Consola de operación (requiere el token de admin)
+if [[ -n "$token" ]] && curl -fsS --max-time 10 -H "Authorization: Bearer $token" http://localhost:8000/api/simulacion > /dev/null 2>&1; then
+  ok "Consola de operación responde (/api/simulacion)"
+else
+  mal "Consola de operación" "/api/simulacion no responde con el token de admin"
 fi
 
 echo

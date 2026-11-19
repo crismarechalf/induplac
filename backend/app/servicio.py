@@ -7,12 +7,12 @@ reglas → actualizar estado_actual → abrir/cerrar alertas → eventos WebSock
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import and_, delete, false, func, or_, select
 from sqlalchemy.orm import Session
 
 from . import config, reglas
-from .catalogo import PUNTOS, VARIABLES_CONSUMO
-from .db import Alerta, EstadoActual, Lote, Medicion
+from .catalogo import PISO_EXCESO, PUNTOS, TURNO, VARIABLES_CONSUMO
+from .db import Alerta, Auditoria, Config, EstadoActual, Incidente, Lote, Medicion
 from .schemas import LoteEntrada
 
 ZONA = ZoneInfo(config.ZONA)
@@ -68,7 +68,7 @@ def _evaluar(s: Session, sede: str, variable: str, valor: float, unidad: str, ts
         serie = _serie(s, sede, variable, reglas.instantes_necesarios(ts))
         actual = reglas.consumo_hora(serie, ts)
         referencia = reglas.referencia_hora(serie, ts)
-        estado = reglas.evaluar_consumo(actual, referencia)
+        estado = reglas.evaluar_consumo(actual, referencia, PISO_EXCESO.get((sede, variable), 0))
         mensaje = (reglas.mensaje_consumo(actual, referencia, unidad, _local(ts).weekday(), variable)
                    if estado != "normal" else "")
         return estado, mensaje, {}
@@ -85,7 +85,14 @@ def _evaluar(s: Session, sede: str, variable: str, valor: float, unidad: str, ts
             return s.scalar(select(func.coalesce(func.sum(Medicion.valor), 0)).where(
                 Medicion.sede == sede, Medicion.variable == "produccion",
                 Medicion.ts >= desde, Medicion.ts <= ts))
-        return "normal", "", {"acumulado_dia": suma(inicio_dia(ts)), "acumulado_mes": suma(inicio_mes(ts))}
+        # Línea detenida: las 2 últimas lecturas (la actual ya está guardada), en hora local.
+        filas = s.execute(select(Medicion.ts, Medicion.valor).where(
+            Medicion.sede == sede, Medicion.variable == "produccion", Medicion.ts <= ts)
+            .order_by(Medicion.ts.desc()).limit(2)).all()
+        lecturas = [(_local(t), v, reglas.en_turno(TURNO[sede], _local(t))) for t, v in reversed(filas)]
+        estado, desde = reglas.evaluar_produccion(lecturas)
+        mensaje = reglas.mensaje_linea_detenida(desde) if desde else ""
+        return estado, mensaje, {"acumulado_dia": suma(inicio_dia(ts)), "acumulado_mes": suma(inicio_mes(ts))}
 
     return "normal", "", {}  # hh_sin_incidentes: indicador
 
@@ -172,11 +179,12 @@ def sedes_sin_datos(s: Session, ahora: datetime | None = None) -> set[str]:
     return {sede for sede in PUNTOS if sede in recibidos and ahora - recibidos[sede] > limite}
 
 
-def estado_actual(s: Session, sin_datos: set[str] | None = None) -> list[dict]:
+def estado_actual(s: Session, sin_datos: set[str] | None = None, vista: dict | None = None) -> list[dict]:
+    """Estado de los puntos de medición; con `vista`, solo los que ese rol puede ver."""
     sin_datos = sedes_sin_datos(s) if sin_datos is None else sin_datos
     filas = {(e.sede, e.variable): e for e in s.scalars(select(EstadoActual))}
     salida = []
-    for sede, variables in PUNTOS.items():
+    for sede, variables in (vista or PUNTOS).items():
         for variable in variables:
             e = filas.get((sede, variable))
             if not e:
@@ -204,3 +212,104 @@ def podar(s: Session) -> int:
     s.execute(delete(Lote).where(Lote.ts < limite))
     s.commit()
     return borradas
+
+
+# ---------------------------------------------------------------- filtrado por rol
+def condicion_vista(modelo, vista: dict):
+    """WHERE (sede, variable) visible para el rol."""
+    return or_(*(and_(modelo.sede == sede, modelo.variable.in_(variables)) for sede, variables in vista.items())) \
+        if vista else false()
+
+
+def alertas(s: Session, vista: dict, activas: bool | None, limite: int) -> list[dict]:
+    q = select(Alerta).where(condicion_vista(Alerta, vista)).order_by(Alerta.ts.desc()).limit(limite)
+    if activas is not None:
+        q = q.where(Alerta.activa.is_(activas))
+    return [alerta_a_dict(a) for a in s.scalars(q)]
+
+
+def mediciones(s: Session, vista: dict, sede: str | None, variable: str | None,
+               desde: datetime | None, limite: int) -> list[dict]:
+    q = select(Medicion).where(condicion_vista(Medicion, vista))
+    if sede:
+        q = q.where(Medicion.sede == sede)
+    if variable:
+        q = q.where(Medicion.variable == variable)
+    if desde:
+        q = q.where(Medicion.ts >= desde)
+    # Las más recientes primero para respetar el límite, y luego en orden cronológico.
+    filas = list(s.scalars(q.order_by(Medicion.ts.desc()).limit(limite)))[::-1]
+    return [{"sede": m.sede, "variable": m.variable, "valor": m.valor, "unidad": m.unidad, "ts": iso(m.ts)}
+            for m in filas]
+
+
+# ---------------------------------------------------------------- reloj de simulación único
+PASO = timedelta(minutes=15)
+
+
+def piso_15min(dt: datetime) -> datetime:
+    return dt.replace(minute=dt.minute - dt.minute % 15, second=0, microsecond=0)
+
+
+def _config(s: Session, clave: str) -> str | None:
+    fila = s.get(Config, clave)
+    return fila.valor if fila else None
+
+
+def iniciar_reloj(s: Session) -> None:
+    """La primera vez guarda el instante real y la hora simulada de inicio.
+
+    La hora simulada arranca después del lote más nuevo que ya exista, para que un
+    despliegue con datos previos (reloj de los gateways ya adelantado) siga sin saltos atrás.
+    """
+    if _config(s, "reloj_inicio_real"):
+        return
+    ahora = ahora_utc()
+    ultimo = s.scalar(select(func.max(Lote.ts)))
+    inicio_sim = max(piso_15min(ahora), ultimo + PASO) if ultimo else piso_15min(ahora)
+    s.add_all([Config(clave="reloj_inicio_real", valor=ahora.isoformat()),
+               Config(clave="reloj_inicio_sim", valor=inicio_sim.isoformat())])
+    s.commit()
+
+
+def factor_reloj() -> float:
+    """Minutos simulados por minuto real: 1 ciclo (CICLO_SEG reales) = 15 min."""
+    return 900 / config.CICLO_SEG if config.CICLO_SEG else 1.0
+
+
+def hora_simulada(s: Session) -> datetime:
+    inicio_real = datetime.fromisoformat(_config(s, "reloj_inicio_real"))
+    inicio_sim = datetime.fromisoformat(_config(s, "reloj_inicio_sim"))
+    return inicio_sim + (ahora_utc() - inicio_real) * factor_reloj()
+
+
+# ---------------------------------------------------------------- incidentes
+TIPOS_INCIDENTE = ("Accidente con tiempo perdido", "Accidente sin tiempo perdido", "Cuasi accidente")
+
+
+def incidente_a_dict(i: Incidente) -> dict:
+    return {"id": str(i.id), "sede": i.sede, "ts": iso(i.ts), "tipo": i.tipo,
+            "descripcion": i.descripcion, "registrado_por": i.registrado_por}
+
+
+def conteo_incidentes(s: Session, sede: str) -> int:
+    """Lo usa el gateway como incidente_id: si sube, reinicia sus HH sin incidentes."""
+    return s.scalar(select(func.count()).select_from(Incidente).where(Incidente.sede == sede))
+
+
+def incidentes(s: Session, limite: int) -> list[dict]:
+    q = select(Incidente).order_by(Incidente.ts.desc(), Incidente.id.desc()).limit(limite)
+    return [incidente_a_dict(i) for i in s.scalars(q)]
+
+
+# ---------------------------------------------------------------- auditoría
+def auditar(s: Session, usuario: str, accion: str, detalle: dict | None = None) -> None:
+    s.add(Auditoria(ts=ahora_utc(), usuario=usuario, accion=accion, detalle=detalle or {}))
+    s.commit()
+
+
+def auditoria(s: Session, limite: int, acciones: tuple[str, ...] | None = None) -> list[dict]:
+    q = select(Auditoria).order_by(Auditoria.ts.desc(), Auditoria.id.desc()).limit(limite)
+    if acciones:
+        q = q.where(Auditoria.accion.in_(acciones))
+    return [{"ts": iso(a.ts), "usuario": a.usuario, "accion": a.accion, "detalle": a.detalle} for a in s.scalars(q)]

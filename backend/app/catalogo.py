@@ -36,3 +36,23 @@ NOMBRE_VARIABLE = {
     "uv": "Índice UV",
 }
 NOMBRE_SEDE = {"oficina_rm": "Oficina RM", "planta": "Planta Valparaíso"}
+
+# Turnos con personal: días de la semana (lunes = 0) y horario local [desde, hasta).
+# La regla "Línea detenida" solo se evalúa dentro del turno de la Planta.
+TURNO: dict[str, tuple[tuple[int, ...], int, int]] = {
+    "oficina_rm": ((0, 1, 2, 3, 4), 8, 19),
+    "planta": ((0, 1, 2, 3, 4, 5), 6, 22),
+}
+
+# Piso de exceso absoluto para la regla de consumo (cierra el issue #2).
+# Con consumos bajos (agua de noche), el ruido normal supera el +20% sin que haya
+# ninguna anomalía. Por eso, además del +20%, el exceso debe ser al menos el 10% del
+# consumo horario típico en turno de esa sede:
+#   electricidad RM 88 kWh/h → 9 · electricidad Planta 560 kWh/h → 56
+#   agua RM 480 L/h → 48        · agua Planta 3.600 L/h → 360
+PISO_EXCESO: dict[tuple[str, str], float] = {
+    ("oficina_rm", "electricidad"): 9,
+    ("planta", "electricidad"): 56,
+    ("oficina_rm", "agua"): 48,
+    ("planta", "agua"): 360,
+}

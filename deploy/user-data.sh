@@ -1,7 +1,7 @@
 #!/bin/bash
 # Induplac · despliegue completo en una EC2 (Ubuntu Server 24.04) desde "User data".
 #
-# 1. Completa las 7 variables de abajo EN LA CONSOLA DE AWS (nunca en el repositorio).
+# 1. Completa las 8 variables de abajo EN LA CONSOLA DE AWS (nunca en el repositorio).
 # 2. Pega el script completo en: Launch instance → Advanced details → User data.
 # Log: /var/log/induplac-deploy.log. Se puede volver a correr: no regenera secretos.
 #
@@ -11,8 +11,9 @@ DUCKDNS_TOKEN="CAMBIAR"
 SMTP_USER="CAMBIAR@gmail.com"
 SMTP_PASS="CAMBIAR"              # contraseña de aplicación de Google (16 caracteres)
 ALERTA_DESTINO=""                # opcional, varios separados por coma; vacío = se avisa a SMTP_USER
-DEMO_USUARIO="CAMBIAR"           # usuario del panel "Demo" del dashboard
-DEMO_CLAVE="CAMBIAR"             # contraseña del panel "Demo"
+ADMIN_USUARIO="admin"            # usuario administrador del dashboard (consola de operación)
+ADMIN_CLAVE="CAMBIAR"            # su contraseña
+USUARIOS_CLAVE="CAMBIAR"         # contraseña de jefatura, prevencion, personal_rm y personal_planta
 # ===============================================================================================
 
 set -euo pipefail
@@ -27,7 +28,7 @@ DOMINIO="${DUCKDNS_SUBDOMINIO}.duckdns.org"
 falla() { echo "ERROR: $*"; exit 1; }
 
 # ---------------------------------------------------------------- 0. validar variables
-for nombre in DUCKDNS_SUBDOMINIO DUCKDNS_TOKEN SMTP_USER SMTP_PASS DEMO_USUARIO DEMO_CLAVE; do
+for nombre in DUCKDNS_SUBDOMINIO DUCKDNS_TOKEN SMTP_USER SMTP_PASS ADMIN_USUARIO ADMIN_CLAVE USUARIOS_CLAVE; do
   valor="${!nombre}"
   [[ -n "$valor" && "$valor" != *CAMBIAR* ]] || falla "Falta completar $nombre al inicio del script"
   # Comillas simples o saltos de línea romperían el .env.
@@ -108,8 +109,9 @@ else
     echo "COMPOSE_PROFILES='gateways,https'"
     echo "DOMINIO='$DOMINIO'"
     echo "URL_PUBLICA='https://$DOMINIO'"
-    echo "DEMO_USUARIO='$DEMO_USUARIO'"
-    echo "DEMO_CLAVE='$DEMO_CLAVE'"
+    echo "ADMIN_USUARIO='$ADMIN_USUARIO'"
+    echo "ADMIN_CLAVE='$ADMIN_CLAVE'"
+    echo "USUARIOS_CLAVE='$USUARIOS_CLAVE'"
     echo "SMTP_HOST='smtp.gmail.com'"
     echo "SMTP_PORT='587'"
     echo "SMTP_USER='$SMTP_USER'"

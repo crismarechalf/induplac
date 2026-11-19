@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Induplac · Ingreso</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/styles.css">
 </head>
 <body class="pagina-entrada">
@@ -18,10 +19,13 @@
     </div>
     <p class="entrada-frase">Consumos e indicadores de la Oficina RM y la Planta Valparaíso, en tiempo real y con alertas tempranas.</p>
 
-    <h2 class="entrada-subtitulo">Elige tu perfil</h2>
-    <div id="perfiles" class="perfiles"></div>
-
-    <p class="aviso">Acceso de demostración: no se solicita contraseña. La autenticación real se incorpora en una etapa posterior.</p>
+    <form id="login" class="login" novalidate>
+      <h2 class="entrada-subtitulo">Iniciar sesión</h2>
+      <label>Usuario <input name="usuario" autocomplete="username" required autofocus></label>
+      <label>Contraseña <input name="clave" type="password" autocomplete="current-password" required></label>
+      <button type="submit" class="btn-principal">Entrar</button>
+      <p id="login-error" class="login-error" role="alert"></p>
+    </form>
   </main>
   <footer class="pie-entrada">Proyecto académico SIY6122 · Duoc UC</footer>
   <script>

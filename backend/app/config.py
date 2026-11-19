@@ -46,12 +46,19 @@ ALERTA_ENFRIAMIENTO_MIN = _int("ALERTA_ENFRIAMIENTO_MIN", 10)
 # Dirección del dashboard que va en los correos.
 URL_PUBLICA = os.getenv("URL_PUBLICA", "")
 
-# Usuario y contraseña del panel "Demo" (POST /api/simulacion). Sin ambos, nadie puede usarlo.
-DEMO_USUARIO = os.getenv("DEMO_USUARIO", "")
-DEMO_CLAVE = os.getenv("DEMO_CLAVE", "")
-# Los marcadores CAMBIAR de .env.example cuentan como "sin configurar".
-if "CAMBIAR" in (DEMO_USUARIO, DEMO_CLAVE):
-    DEMO_USUARIO = DEMO_CLAVE = ""
+def _env(nombre: str, alias: str = "") -> str:
+    """Variable de entorno; los marcadores CAMBIAR de .env.example cuentan como vacíos."""
+    valor = os.getenv(nombre) or (os.getenv(alias) if alias else "") or ""
+    return "" if "CAMBIAR" in valor else valor
+
+
+# Usuarios iniciales del dashboard (se crean solo si la tabla usuarios está vacía).
+# DEMO_USUARIO / DEMO_CLAVE: alias de la versión anterior, para no romper un .env ya creado.
+ADMIN_USUARIO = _env("ADMIN_USUARIO", "DEMO_USUARIO") or "admin"
+ADMIN_CLAVE = _env("ADMIN_CLAVE", "DEMO_CLAVE")
+USUARIOS_CLAVE = _env("USUARIOS_CLAVE", "DEMO_CLAVE")
+# Duración de la sesión en el dashboard.
+SESION_HORAS = _int("SESION_HORAS", 8)
 
 # Mediciones que se conservan, en días del reloj de las lecturas (simulado en la demo).
 # Nunca menos de 29: la regla de consumo necesita 4 semanas + 1 h de historial.

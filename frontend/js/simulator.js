@@ -53,8 +53,6 @@ const enTurno = (sede, fecha) => {
   return t.dias.includes(fecha.getDay()) && h >= t.desde && h < t.hasta;
 };
 
-// Escenarios de demo activos (se pueden combinar).
-const demo = { picoElectrico: false, picoAgua: false, uvAlto: false };
 
 const hh = { oficina_rm: 18450, planta: 96320 };
 const hhDia = {}; // día local en que se actualizó el contador por última vez
@@ -76,12 +74,10 @@ function generar(sede, variable, fecha) {
   switch (variable) {
     case 'electricidad': {
       let v = BASE.electricidad[sede][turno] * ruido(0.08);
-      if (demo.picoElectrico && sede === 'planta') v *= 1.35;
       return redondear(v, 1);
     }
     case 'agua': {
       let v = BASE.agua[sede][turno] * ruido(0.15);
-      if (demo.picoAgua && sede === 'oficina_rm') v *= 1.6; // fuga simulada
       return Math.round(v);
     }
     case 'produccion':
@@ -89,7 +85,6 @@ function generar(sede, variable, fecha) {
     case 'hh_sin_incidentes':
       return hh[sede];
     case 'uv': {
-      if (demo.uvAlto) return 9; // escenario de demo: fuerza UV alto aunque sea de noche
       const h = fecha.getHours() + fecha.getMinutes() / 60;
       if (h < 7 || h > 19) return 0;
       return redondear(Math.min(7.6, 7.4 * Math.sin((Math.PI * (h - 7)) / 12) * ruido(0.05)), 1);
@@ -339,59 +334,3 @@ export function suscribir(fn) {
   if (!temporizador) reprogramar();
   return () => oyentes.delete(fn);
 }
-
-// Aplica un cambio con un ciclo inmediato para que se vea sin esperar.
-const aplicar = () => {
-  tick();
-  reprogramar();
-};
-
-// Escenarios del panel de demo.
-export const escenarios = {
-  normal() {
-    for (const k of Object.keys(demo)) demo[k] = false;
-    aplicar();
-  },
-  picoElectrico() {
-    demo.picoElectrico = true;
-    aplicar();
-  },
-  picoAgua() {
-    demo.picoAgua = true;
-    aplicar();
-  },
-  uvAlto() {
-    demo.uvAlto = true;
-    aplicar();
-  },
-  registrarIncidente(sede) {
-    if (!(sede in hh)) return;
-    hh[sede] = 0;
-    aplicar();
-  },
-  desconectar(sede) {
-    if (sedes[sede]) sedes[sede].conectada = false;
-  },
-  // Entrega los lotes acumulados en orden. Simula además que el gateway reenvía su
-  // último lote ya entregado: ingerirLote() lo descarta, así no hay duplicados.
-  reconectar() {
-    for (const s of Object.values(sedes)) {
-      if (s.conectada) continue;
-      for (const lote of [s.ultimoEntregado, ...s.buffer]) ingerirLote(lote);
-      s.ultimoEntregado = s.buffer.at(-1) ?? s.ultimoEntregado;
-      Object.assign(s, { conectada: true, buffer: [] });
-    }
-    emitirEstado();
-  },
-  // Estado base con un clic: operación normal + reconectar.
-  restablecer() {
-    escenarios.reconectar();
-    escenarios.normal();
-  },
-  resumen() {
-    return {
-      activos: Object.keys(demo).filter((k) => demo[k]),
-      desconectadas: Object.keys(sedes).filter((s) => !sedes[s].conectada),
-    };
-  },
-};

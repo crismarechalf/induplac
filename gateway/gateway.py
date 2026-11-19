@@ -12,8 +12,11 @@ Uso (demo, reloj acelerado: 3 s reales = 15 min):
     python gateway.py --sede oficina_rm
 Operación real: --ciclo 900
 
-En cada ciclo consulta GET /api/simulacion/{sede} y aplica los escenarios del
-panel "Demo" del dashboard. En un contenedor: --sin-consola.
+En cada ciclo consulta al servidor:
+- GET /api/reloj: hora simulada única. El ts de cada lote es piso_15min(hora del servidor),
+  así las dos sedes quedan siempre alineadas. Si el servidor no responde, sigue con su reloj.
+- GET /api/simulacion/{sede}: ajustes de la consola de operación (admin) e incidentes.
+En un contenedor: --sin-consola.
 
 Comandos en la consola mientras corre (se suman a los del panel):
     e  pico eléctrico (+35%)      a  pico de agua (+60%, fuga)
@@ -58,6 +61,32 @@ BASE = {  # consumo por intervalo de 15 min: (en turno, fuera de turno)
 HH_INICIAL = {"oficina_rm": 18450, "planta": 96320}
 
 
+MAX_RELLENO = 8  # intervalos que se completan si el reloj del servidor se adelantó (2 h simuladas)
+
+
+def piso_15min(dt):
+    return dt.replace(minute=dt.minute - dt.minute % 15, second=0, microsecond=0)
+
+
+def pasos_a_generar(ultimo, hora_servidor):
+    """Instantes (ts) de los lotes a generar en este ciclo.
+
+    - Con servidor: hasta piso_15min(hora del servidor), si es mayor que el último generado.
+      Si es igual, ninguno (se espera el siguiente ciclo). Si se adelantó poco, se completan
+      los intervalos intermedios; si se adelantó mucho (gateway detenido), se salta al actual.
+    - Sin servidor: sigue con su reloj local (un intervalo por ciclo) y se realinea al volver.
+    """
+    if hora_servidor is None:
+        return [ultimo + PASO]
+    objetivo = piso_15min(hora_servidor)
+    if objetivo <= ultimo:
+        return []
+    faltan = int((objetivo - ultimo) / PASO)
+    if faltan > MAX_RELLENO:
+        return [objetivo]
+    return [ultimo + PASO * i for i in range(1, faltan + 1)]
+
+
 def ruido(p):
     return 1 + (random.random() * 2 - 1) * p
 
@@ -72,9 +101,9 @@ class Medidores:
         # Escenarios activados con las teclas de la consola (local).
         self.pico_electrico = self.pico_agua = False
         self.uv_forzado = None
-        # Escenarios activados desde el panel "Demo" del dashboard (GET /api/simulacion/{sede}).
-        # Se suman a los locales: cualquiera de los dos activa el escenario.
-        self.remoto = {"pico_electrico": False, "pico_agua": False, "uv_forzado": None}
+        # Ajustes de la consola de operación (GET /api/simulacion/{sede}). Se combinan con los
+        # locales: los factores se multiplican y el UV forzado local tiene prioridad.
+        self.remoto = {"electricidad_pct": 0, "agua_pct": 0, "produccion_pct": 100, "uv_forzado": None}
 
     def en_turno(self, local):
         dias, desde, hasta = TURNO[self.sede]
@@ -93,19 +122,20 @@ class Medidores:
         local = ts_utc.astimezone(ZONA)
         self._actualizar_hh(local)
         turno = 0 if self.en_turno(local) else 1
-        pico_electrico = self.pico_electrico or self.remoto["pico_electrico"]
-        pico_agua = self.pico_agua or self.remoto["pico_agua"]
+        f_electricidad = (1.35 if self.pico_electrico else 1) * (1 + self.remoto["electricidad_pct"] / 100)
+        f_agua = (1.6 if self.pico_agua else 1) * (1 + self.remoto["agua_pct"] / 100)
+        f_produccion = self.remoto["produccion_pct"] / 100
         uv_forzado = self.uv_forzado if self.uv_forzado is not None else self.remoto["uv_forzado"]
         valores = {}
         for variable in PUNTOS[self.sede]:
             if variable == "electricidad":
-                v = BASE["electricidad"][self.sede][turno] * ruido(0.08) * (1.35 if pico_electrico else 1)
+                v = BASE["electricidad"][self.sede][turno] * ruido(0.08) * f_electricidad
                 valores[variable] = round(v, 1)
             elif variable == "agua":
-                v = BASE["agua"][self.sede][turno] * ruido(0.15) * (1.6 if pico_agua else 1)
+                v = BASE["agua"][self.sede][turno] * ruido(0.15) * f_agua
                 valores[variable] = round(v)
             elif variable == "produccion":
-                valores[variable] = round(45 * ruido(0.15)) if turno == 0 else 0
+                valores[variable] = round(45 * ruido(0.15) * f_produccion) if turno == 0 else 0
             elif variable == "hh_sin_incidentes":
                 valores[variable] = self.hh
             elif variable == "uv":
@@ -195,6 +225,18 @@ class ClienteAPI:
     def simulacion(self, sede):
         return self._con_token(f"/api/simulacion/{sede}")
 
+    def reloj(self):
+        """(hora simulada UTC, factor, instante local de la consulta) o None si el servidor no responde."""
+        try:
+            r = self._con_token("/api/reloj")
+            return datetime.fromisoformat(r["hora_simulada"].replace("Z", "+00:00")), r["factor"], time.monotonic()
+        except (urllib.error.URLError, OSError, ValueError, KeyError):
+            return None
+
+    def hora_simulada(self):
+        r = self.reloj()
+        return r[0] if r else None
+
 
 class Gateway:
     def __init__(self, args):
@@ -203,15 +245,18 @@ class Gateway:
         self.cliente = ClienteAPI(args.api, args.id or f"gw-{args.sede.replace('_', '-')}", args.secreto)
         self.medidores = Medidores(args.sede, self.cola.leer_estado("hh", HH_INICIAL[args.sede]))
         self.enlace = True                # teclas d / r de la consola
-        self.desconectado_remoto = False  # "Desconectar sede" del panel Demo
+        self.desconectado_remoto = False  # "Enlace cortado" en la consola de operación
         self.consola = not args.sin_consola and sys.stdin.isatty()
         self.activo = True
+        self.ultimo_reloj = None
         guardado = self.cola.leer_estado("reloj")
-        ahora = datetime.now(timezone.utc).replace(second=0, microsecond=0)
-        ahora -= timedelta(minutes=ahora.minute % 15)
+        ahora = piso_15min(datetime.now(timezone.utc))
         if guardado:
             self.reloj = datetime.fromisoformat(guardado)
         else:
+            # El historial termina en la hora simulada del servidor (o en la real si no responde).
+            servidor = self.cliente.hora_simulada()
+            ahora = piso_15min(servidor) if servidor else ahora
             self.reloj = ahora
             if not args.sin_historico:
                 self.cargar_historial(ahora)
@@ -240,18 +285,18 @@ class Gateway:
             sim = self.cliente.simulacion(self.sede)
         except (urllib.error.URLError, OSError, ValueError, KeyError):
             return
-        anterior = dict(self.medidores.remoto, desconectado=self.desconectado_remoto)
-        self.medidores.remoto = {k: sim[k] for k in ("pico_electrico", "pico_agua", "uv_forzado")}
-        self.desconectado_remoto = sim["desconectado"]
-        actual = dict(self.medidores.remoto, desconectado=self.desconectado_remoto)
+        anterior = dict(self.medidores.remoto, enlace_cortado=self.desconectado_remoto)
+        self.medidores.remoto = {k: sim[k] for k in ("electricidad_pct", "agua_pct", "produccion_pct", "uv_forzado")}
+        self.desconectado_remoto = sim["enlace_cortado"]
+        actual = dict(self.medidores.remoto, enlace_cortado=self.desconectado_remoto)
         if actual != anterior:
-            self.log(f"Panel Demo: {actual}")
+            self.log(f"Consola: {actual}")
         # Incidente: evento de una sola vez. Solo cuenta un id mayor al último visto
         # (si la API se reinicia, el id vuelve a 0 y no debe borrar las HH).
         visto = self.cola.leer_estado("incidente_id")
         if visto is not None and sim["incidente_id"] > visto:
             self.medidores.hh = 0
-            self.log("Panel Demo: incidente registrado, HH sin incidentes = 0")
+            self.log("Incidente registrado en la sede: HH sin incidentes = 0")
         if sim["incidente_id"] != visto:
             self.cola.guardar_estado("incidente_id", sim["incidente_id"])
 
@@ -281,13 +326,15 @@ class Gateway:
 
     def ciclo_lectura(self):
         self.consultar_simulacion()
-        self.reloj += PASO
-        lote = self.medidores.leer(self.reloj)
-        self.cola.guardar([lote])
+        self.ultimo_reloj = self.cliente.reloj()
+        for ts in pasos_a_generar(self.reloj, self.ultimo_reloj[0] if self.ultimo_reloj else None):
+            self.reloj = ts
+            lote = self.medidores.leer(ts)
+            self.cola.guardar([lote])
+            resumen = ", ".join(f"{m['variable']}={m['valor']}" for m in lote["mediciones"])
+            self.log(f"{lote['ts']} {resumen}" + ("" if self.puede_enviar() else "  [ENLACE CORTADO]"))
         self.cola.guardar_estado("reloj", self.reloj.isoformat())
         self.cola.guardar_estado("hh", self.medidores.hh)
-        resumen = ", ".join(f"{m['variable']}={m['valor']}" for m in lote["mediciones"])
-        self.log(f"{lote['ts']} {resumen}" + ("" if self.puede_enviar() else "  [ENLACE CORTADO]"))
         self.vaciar_cola()
 
     def comandos(self):
@@ -324,7 +371,19 @@ class Gateway:
         while self.activo:
             inicio = time.monotonic()
             self.ciclo_lectura()
-            time.sleep(max(0, self.ciclo - (time.monotonic() - inicio)))
+            time.sleep(self.espera(inicio))
+
+    def espera(self, inicio):
+        """Hasta el próximo cuarto de hora del reloj del servidor (las dos sedes leen a la vez).
+
+        Sin servidor, un ciclo local de --ciclo segundos.
+        """
+        if not self.ultimo_reloj:
+            return max(0, self.ciclo - (time.monotonic() - inicio))
+        hora, factor, consultado = self.ultimo_reloj
+        frontera = piso_15min(hora) + PASO
+        segundos = (frontera - hora).total_seconds() / factor - (time.monotonic() - consultado)
+        return min(max(segundos, 0) + 0.2, self.ciclo * 2)  # 0,2 s de margen para no quedar justo antes
 
 
 def main():
@@ -332,7 +391,8 @@ def main():
     sys.stdout.reconfigure(errors="replace")
     p = argparse.ArgumentParser(description="Gateway de sede Induplac")
     p.add_argument("--sede", required=True, choices=list(PUNTOS))
-    p.add_argument("--api", default=os.getenv("INDUPLAC_API", "http://localhost:8000"))
+    # 127.0.0.1 y no "localhost": en Windows, localhost tarda ~2 s por consulta (prueba IPv6 primero).
+    p.add_argument("--api", default=os.getenv("INDUPLAC_API", "http://127.0.0.1:8000"))
     p.add_argument("--id", help="id del gateway (por defecto gw-oficina-rm / gw-planta)")
     p.add_argument("--secreto", default=os.getenv("GATEWAY_SECRET"))
     p.add_argument("--ciclo", type=float, default=float(os.getenv("CICLO_SEG", 3)),

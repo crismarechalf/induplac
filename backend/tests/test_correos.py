@@ -5,7 +5,7 @@ from datetime import timedelta
 import pytest
 
 from app import config, notificador
-from tests.conftest import token
+from tests.conftest import token, token_usuario, usuario
 from tests.test_api import T0, historial, lote
 
 
@@ -64,7 +64,7 @@ def test_alerta_critica_envia_un_correo_y_enfria(cliente, correos):
     assert correos[0]["To"] == "induplac@prueba.cl"
     cliente.post("/api/lotes", json=hora(5, 140), headers=h)          # normaliza: se cierra
     cliente.post("/api/lotes", json=hora(9, 140 * 1.35), headers=h)   # nuevo pico dentro del enfriamiento
-    assert len(cliente.get("/api/alertas", params={"activas": True}).json()) == 1
+    assert len(cliente.get("/api/alertas", headers=usuario(cliente), params={"activas": True}).json()) == 1
     assert len(esperar(correos, 2)) == 1
 
 
@@ -72,7 +72,7 @@ def test_carga_de_historial_no_envia_correos(cliente, correos):
     # Un solo request (como el reenvío de la cola) donde la alerta se abre y se cierra.
     lotes = historial(horas=5, fin=T0 + timedelta(hours=4)) + hora(1, 140 * 1.35) + hora(5, 140)
     cliente.post("/api/lotes", json=lotes, headers=token(cliente))
-    assert cliente.get("/api/alertas", params={"activas": False}).json()  # la alerta existió
+    assert cliente.get("/api/alertas", headers=usuario(cliente), params={"activas": False}).json()  # la alerta existió
     assert esperar(correos, 1) == []
 
 

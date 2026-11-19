@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Induplac · Dashboard</title>
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
   <link rel="stylesheet" href="css/styles.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 </head>
@@ -17,8 +18,11 @@
       </svg>
       <span>Induplac</span>
     </div>
-    <p class="perfil-activo">Perfil: <strong id="perfil-nombre"></strong></p>
+    <p class="hora-simulada" title="Reloj de la simulación: 1 ciclo = 15 minutos">Hora simulada <strong id="hora-simulada">--:--</strong></p>
+    <p class="perfil-activo"><strong id="usuario-nombre"></strong> · <span id="usuario-rol"></span></p>
     <p id="conexion" class="conexion" role="status"><span class="punto" aria-hidden="true"></span><span class="conexion-texto">Conectando…</span></p>
+    <button id="btn-incidente" class="btn-salir" hidden>Registrar incidente</button>
+    <button id="btn-consola" class="btn-salir" hidden aria-expanded="false">Consola</button>
     <button id="salir" class="btn-salir">Salir</button>
   </header>
 
@@ -28,6 +32,10 @@
     <aside class="panel alertas" aria-labelledby="titulo-alertas">
       <h2 id="titulo-alertas">Alertas activas <span id="total-alertas" class="contador">0</span></h2>
       <ul id="lista-alertas" class="lista-alertas" aria-live="polite"></ul>
+      <section id="incidentes" class="incidentes" aria-labelledby="titulo-incidentes" hidden>
+        <h2 id="titulo-incidentes">Incidentes recientes</h2>
+        <ul id="lista-incidentes" class="lista-incidentes"></ul>
+      </section>
     </aside>
 
     <section id="historico" class="panel historico" aria-labelledby="titulo-historico">

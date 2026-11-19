@@ -2,7 +2,7 @@
 from datetime import datetime, timedelta, timezone
 
 from app import config
-from tests.conftest import token
+from tests.conftest import token, token_usuario, usuario
 
 T0 = datetime(2026, 11, 18, 18, 0, tzinfo=timezone.utc)  # miércoles 15:00 en Chile
 
@@ -42,7 +42,7 @@ def test_gateway_no_puede_suplantar_otra_sede(cliente):
 
 
 def test_cabecera_nosniff(cliente):
-    assert cliente.get("/api/estado").headers["x-content-type-options"] == "nosniff"
+    assert cliente.get("/api/estado", headers=usuario(cliente)).headers["x-content-type-options"] == "nosniff"
 
 
 # ---------------------------------------------------------------- validación
@@ -82,13 +82,13 @@ def test_reenvio_de_cola_en_orden(cliente):
     lotes = [lote(ts=T0 + timedelta(minutes=15 * i)) for i in (3, 1, 2, 0)]  # llegan desordenados
     r = cliente.post("/api/lotes", json=lotes, headers=token(cliente))
     assert r.json()["aceptados"] == 4
-    serie = cliente.get("/api/mediciones", params={"sede": "planta", "variable": "electricidad"}).json()
+    serie = cliente.get("/api/mediciones", headers=usuario(cliente), params={"sede": "planta", "variable": "electricidad"}).json()
     assert [m["ts"] for m in serie] == sorted(m["ts"] for m in serie)
 
 
 def test_estado_y_extras(cliente):
     cliente.post("/api/lotes", json=lote(uv=6.2), headers=token(cliente))
-    estado = {(e["sede"], e["variable"]): e for e in cliente.get("/api/estado").json()}
+    estado = {(e["sede"], e["variable"]): e for e in cliente.get("/api/estado", headers=usuario(cliente)).json()}
     assert len(estado) == 5
     assert estado[("planta", "uv")]["max_dia"] == 6.2
     assert estado[("planta", "produccion")]["acumulado_dia"] == 45
@@ -102,35 +102,35 @@ def test_pico_electrico_genera_y_cierra_alerta(cliente):
     # Hora actual: 4 intervalos a +35%
     pico = [lote(ts=T0 + timedelta(minutes=15 * i), elec=140 * 1.35) for i in range(1, 5)]
     cliente.post("/api/lotes", json=pico, headers=h)
-    estado = {(e["sede"], e["variable"]): e for e in cliente.get("/api/estado").json()}
+    estado = {(e["sede"], e["variable"]): e for e in cliente.get("/api/estado", headers=usuario(cliente)).json()}
     assert estado[("planta", "electricidad")]["estado"] == "critico"
-    activas = cliente.get("/api/alertas", params={"activas": True}).json()
+    activas = cliente.get("/api/alertas", headers=usuario(cliente), params={"activas": True}).json()
     assert len(activas) == 1 and activas[0]["variable"] == "electricidad" and "supera en" in activas[0]["mensaje"]
     # Vuelve a la normalidad: el consumo de la hora baja y la alerta se cierra.
     normal = [lote(ts=T0 + timedelta(minutes=15 * i), elec=140) for i in range(5, 9)]
     cliente.post("/api/lotes", json=normal, headers=h)
-    assert cliente.get("/api/alertas", params={"activas": True}).json() == []
-    assert cliente.get("/api/alertas", params={"activas": False}).json()[0]["activa"] is False
+    assert cliente.get("/api/alertas", headers=usuario(cliente), params={"activas": True}).json() == []
+    assert cliente.get("/api/alertas", headers=usuario(cliente), params={"activas": False}).json()[0]["activa"] is False
 
 
 def test_uv_advertencia_luego_critico(cliente):
     h = token(cliente)
     cliente.post("/api/lotes", json=lote(uv=9), headers=h)
     cliente.post("/api/lotes", json=lote(ts=T0 + timedelta(minutes=15), uv=11), headers=h)
-    activas = cliente.get("/api/alertas", params={"activas": True}).json()
+    activas = cliente.get("/api/alertas", headers=usuario(cliente), params={"activas": True}).json()
     assert [a["nivel"] for a in activas] == ["critico"]  # la advertencia se cerró al escalar
 
 
 def test_sede_sin_datos(cliente, monkeypatch):
     cliente.post("/api/lotes", json=lote(), headers=token(cliente))
     monkeypatch.setattr(config, "CICLO_SEG", 0)  # cualquier espera supera 2 ciclos
-    estado = cliente.get("/api/estado").json()
+    estado = cliente.get("/api/estado", headers=usuario(cliente)).json()
     assert {e["estado"] for e in estado} == {"sin_datos"}
     assert cliente.get("/api/salud").json()["sedes"]["planta"]["sin_datos"] is True
 
 
 def test_websocket_recibe_eventos(cliente):
-    with cliente.websocket_connect("/ws") as ws:
+    with cliente.websocket_connect("/ws?token=" + token_usuario(cliente)) as ws:
         cliente.post("/api/lotes", json=lote(uv=9), headers=token(cliente))
         tipos = {ws.receive_json()["tipo"], ws.receive_json()["tipo"]}
     assert tipos == {"alerta", "estado"}

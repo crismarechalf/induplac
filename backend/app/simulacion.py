@@ -1,53 +1,44 @@
-"""Escenarios de la demo que se controlan desde el panel "Demo" del dashboard.
+"""Consola de operación y pruebas (rol admin): ajusta cada variable de cada sede.
 
-El estado vive en memoria del proceso (no en la base): es solo para la
-presentación y vuelve a la operación normal si la API se reinicia.
-Cada gateway lo consulta en cada ciclo (GET /api/simulacion/{sede}) y lo aplica
-a sus medidores, con la misma semántica que el simulador del frontend.
+El estado vive en memoria del proceso: si la API se reinicia, todo vuelve a "Automático".
+Cada gateway lo consulta en cada ciclo (GET /api/simulacion/{sede}) y lo aplica a sus medidores:
+consumo × (1 + pct/100), producción × pct/100, UV forzado y enlace cortado.
 """
-ESCENARIOS = ("picoElectrico", "picoAgua", "uvAlto")
-ACCIONES = ESCENARIOS + ("normal", "desconectar", "reconectar", "registrarIncidente", "restablecer")
-ACCIONES_CON_SEDE = ("desconectar", "registrarIncidente")
+from .catalogo import PUNTOS
 
-_activos: set[str] = set()
-_desconectadas: set[str] = set()
-_incidentes: dict[str, int] = {}
+# Valor "Automático" de cada control (el gateway mide sin intervenir).
+BASE = {"electricidad_pct": 0, "agua_pct": 0, "produccion_pct": 100, "uv_forzado": None, "enlace_cortado": False}
 
+# Control → variable del catálogo que necesita (el enlace existe en todas las sedes).
+VARIABLE_DEL_CONTROL = {"electricidad_pct": "electricidad", "agua_pct": "agua",
+                        "produccion_pct": "produccion", "uv_forzado": "uv"}
 
-def reiniciar() -> None:
-    _activos.clear()
-    _desconectadas.clear()
-    _incidentes.clear()
+_estado: dict[str, dict] = {}
 
 
-def resumen() -> dict:
-    """Lo que muestra el panel: escenarios activos y sedes desconectadas."""
-    return {"activos": [e for e in ESCENARIOS if e in _activos], "desconectadas": sorted(_desconectadas)}
+def controles(sede: str) -> list[str]:
+    """Controles que existen en la sede (la Oficina RM no tiene producción ni UV)."""
+    return [c for c in BASE if VARIABLE_DEL_CONTROL.get(c) in PUNTOS[sede] or c == "enlace_cortado"]
 
 
-def aplicar(accion: str, sede: str | None = None) -> dict:
-    if accion in ESCENARIOS:          # acumulables
-        _activos.add(accion)
-    elif accion == "normal":          # apaga los escenarios, no reconecta
-        _activos.clear()
-    elif accion == "desconectar":     # la sede deja de enviar lotes (sigue midiendo y encolando)
-        _desconectadas.add(sede)
-    elif accion == "reconectar":      # todas vuelven a enviar y vacían su cola
-        _desconectadas.clear()
-    elif accion == "registrarIncidente":
-        _incidentes[sede] = _incidentes.get(sede, 0) + 1
-    elif accion == "restablecer":     # estado base con un clic: normal + reconectar
-        _activos.clear()
-        _desconectadas.clear()
-    return resumen()
+def restablecer() -> None:
+    _estado.clear()
+    for sede in PUNTOS:
+        _estado[sede] = {c: BASE[c] for c in controles(sede)}
 
 
-def para_sede(sede: str) -> dict:
-    """Instrucciones para el gateway de una sede (la ruta ya validó la sede)."""
-    return {
-        "pico_electrico": "picoElectrico" in _activos and sede == "planta",
-        "pico_agua": "picoAgua" in _activos and sede == "oficina_rm",
-        "uv_forzado": 9 if "uvAlto" in _activos and sede == "planta" else None,
-        "desconectado": sede in _desconectadas,
-        "incidente_id": _incidentes.get(sede, 0),
-    }
+def de_sede(sede: str) -> dict:
+    return dict(_estado[sede])
+
+
+def todas() -> dict:
+    return {sede: de_sede(sede) for sede in PUNTOS}
+
+
+def aplicar(sede: str, cambios: dict) -> dict:
+    """Aplica los cambios (ya validados por rango y catálogo) y devuelve el estado de la sede."""
+    _estado[sede].update(cambios)
+    return de_sede(sede)
+
+
+restablecer()
