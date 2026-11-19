@@ -1,6 +1,5 @@
 // Orquestador del dashboard: conecta el proveedor de datos con los componentes de UI.
 // No contiene reglas de negocio: los estados y alertas llegan calculados del proveedor.
-import { DATA_SOURCE } from './config.js';
 import { proveedor } from './data/index.js';
 import { PERFILES, leerPerfil, borrarPerfil, puedeVer } from './perfiles.js';
 import { montarSedes, pintarEstado } from './ui/tarjetas.js';
@@ -77,6 +76,6 @@ async function iniciar() {
 
   await sincronizar();
 
-  // El panel de demo existe solo con el simulador.
-  if (DATA_SOURCE === 'mock' && proveedor.escenarios) montarDemo(proveedor.escenarios);
+  // Panel de demo: con el simulador o con la API (ahí pide usuario y contraseña).
+  if (proveedor.escenarios) montarDemo(proveedor.escenarios);
 }

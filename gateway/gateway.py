@@ -12,7 +12,10 @@ Uso (demo, reloj acelerado: 3 s reales = 15 min):
     python gateway.py --sede oficina_rm
 Operación real: --ciclo 900
 
-Comandos en la consola mientras corre:
+En cada ciclo consulta GET /api/simulacion/{sede} y aplica los escenarios del
+panel "Demo" del dashboard. En un contenedor: --sin-consola.
+
+Comandos en la consola mientras corre (se suman a los del panel):
     e  pico eléctrico (+35%)      a  pico de agua (+60%, fuga)
     u  UV alto (índice 9)         x  UV extremo (índice 11)
     i  registrar incidente (HH a 0)
@@ -66,8 +69,12 @@ class Medidores:
         self.sede = sede
         self.hh = hh
         self.dia_hh = None
+        # Escenarios activados con las teclas de la consola (local).
         self.pico_electrico = self.pico_agua = False
         self.uv_forzado = None
+        # Escenarios activados desde el panel "Demo" del dashboard (GET /api/simulacion/{sede}).
+        # Se suman a los locales: cualquiera de los dos activa el escenario.
+        self.remoto = {"pico_electrico": False, "pico_agua": False, "uv_forzado": None}
 
     def en_turno(self, local):
         dias, desde, hasta = TURNO[self.sede]
@@ -86,21 +93,24 @@ class Medidores:
         local = ts_utc.astimezone(ZONA)
         self._actualizar_hh(local)
         turno = 0 if self.en_turno(local) else 1
+        pico_electrico = self.pico_electrico or self.remoto["pico_electrico"]
+        pico_agua = self.pico_agua or self.remoto["pico_agua"]
+        uv_forzado = self.uv_forzado if self.uv_forzado is not None else self.remoto["uv_forzado"]
         valores = {}
         for variable in PUNTOS[self.sede]:
             if variable == "electricidad":
-                v = BASE["electricidad"][self.sede][turno] * ruido(0.08) * (1.35 if self.pico_electrico else 1)
+                v = BASE["electricidad"][self.sede][turno] * ruido(0.08) * (1.35 if pico_electrico else 1)
                 valores[variable] = round(v, 1)
             elif variable == "agua":
-                v = BASE["agua"][self.sede][turno] * ruido(0.15) * (1.6 if self.pico_agua else 1)
+                v = BASE["agua"][self.sede][turno] * ruido(0.15) * (1.6 if pico_agua else 1)
                 valores[variable] = round(v)
             elif variable == "produccion":
                 valores[variable] = round(45 * ruido(0.15)) if turno == 0 else 0
             elif variable == "hh_sin_incidentes":
                 valores[variable] = self.hh
             elif variable == "uv":
-                if self.uv_forzado is not None:
-                    valores[variable] = self.uv_forzado
+                if uv_forzado is not None:
+                    valores[variable] = uv_forzado
                 else:
                     h = local.hour + local.minute / 60
                     uv = 0 if h < 7 or h > 19 else min(7.6, 7.4 * math.sin(math.pi * (h - 7) / 12) * ruido(0.05))
@@ -158,24 +168,32 @@ class ClienteAPI:
         self.gateway_id, self.secreto = gateway_id, secreto
         self.token = None
 
-    def _post(self, ruta, cuerpo, token=None):
-        req = urllib.request.Request(self.api + ruta, data=json.dumps(cuerpo).encode(), method="POST",
+    def _pedir(self, ruta, cuerpo=None, token=None):
+        """GET si no hay cuerpo, POST con JSON si lo hay."""
+        datos = None if cuerpo is None else json.dumps(cuerpo).encode()
+        req = urllib.request.Request(self.api + ruta, data=datos, method="GET" if datos is None else "POST",
                                      headers={"Content-Type": "application/json"})
         if token:
             req.add_header("Authorization", f"Bearer {token}")
         with urllib.request.urlopen(req, timeout=15) as r:
             return json.loads(r.read())
 
-    def enviar(self, lotes, reintento=True):
+    def _con_token(self, ruta, cuerpo=None, reintento=True):
         if not self.token:
-            self.token = self._post("/api/auth/token", {"gateway_id": self.gateway_id, "secreto": self.secreto})["access_token"]
+            self.token = self._pedir("/api/auth/token", {"gateway_id": self.gateway_id, "secreto": self.secreto})["access_token"]
         try:
-            return self._post("/api/lotes", lotes, self.token)
+            return self._pedir(ruta, cuerpo, self.token)
         except urllib.error.HTTPError as e:
             if e.code == 401 and reintento:  # token vencido: se pide otro y se reintenta una sola vez
                 self.token = None
-                return self.enviar(lotes, reintento=False)
+                return self._con_token(ruta, cuerpo, reintento=False)
             raise
+
+    def enviar(self, lotes):
+        return self._con_token("/api/lotes", lotes)
+
+    def simulacion(self, sede):
+        return self._con_token(f"/api/simulacion/{sede}")
 
 
 class Gateway:
@@ -184,7 +202,9 @@ class Gateway:
         self.cola = Cola(args.cola or f"cola_{args.sede}.db")
         self.cliente = ClienteAPI(args.api, args.id or f"gw-{args.sede.replace('_', '-')}", args.secreto)
         self.medidores = Medidores(args.sede, self.cola.leer_estado("hh", HH_INICIAL[args.sede]))
-        self.enlace = True
+        self.enlace = True                # teclas d / r de la consola
+        self.desconectado_remoto = False  # "Desconectar sede" del panel Demo
+        self.consola = not args.sin_consola and sys.stdin.isatty()
         self.activo = True
         guardado = self.cola.leer_estado("reloj")
         ahora = datetime.now(timezone.utc).replace(second=0, microsecond=0)
@@ -211,8 +231,32 @@ class Gateway:
         self.cola.guardar_estado("reloj", hasta.isoformat())
         self.log(f"Historial generado: {len(lotes)} lotes ({SEMANAS_HISTORIAL} semanas) en cola")
 
+    def puede_enviar(self):
+        return self.enlace and not self.desconectado_remoto
+
+    def consultar_simulacion(self):
+        """Aplica los escenarios del panel Demo. Si la consulta falla, se mantiene el último estado."""
+        try:
+            sim = self.cliente.simulacion(self.sede)
+        except (urllib.error.URLError, OSError, ValueError, KeyError):
+            return
+        anterior = dict(self.medidores.remoto, desconectado=self.desconectado_remoto)
+        self.medidores.remoto = {k: sim[k] for k in ("pico_electrico", "pico_agua", "uv_forzado")}
+        self.desconectado_remoto = sim["desconectado"]
+        actual = dict(self.medidores.remoto, desconectado=self.desconectado_remoto)
+        if actual != anterior:
+            self.log(f"Panel Demo: {actual}")
+        # Incidente: evento de una sola vez. Solo cuenta un id mayor al último visto
+        # (si la API se reinicia, el id vuelve a 0 y no debe borrar las HH).
+        visto = self.cola.leer_estado("incidente_id")
+        if visto is not None and sim["incidente_id"] > visto:
+            self.medidores.hh = 0
+            self.log("Panel Demo: incidente registrado, HH sin incidentes = 0")
+        if sim["incidente_id"] != visto:
+            self.cola.guardar_estado("incidente_id", sim["incidente_id"])
+
     def vaciar_cola(self):
-        if not self.enlace:
+        if not self.puede_enviar():
             return
         while True:
             claves, lotes = self.cola.pendientes(TAMANO_ENVIO)
@@ -236,13 +280,14 @@ class Gateway:
                 self.log(f"Enviados {len(lotes)} lote(s): {r['aceptados']} aceptados, {r['descartados']} descartados")
 
     def ciclo_lectura(self):
+        self.consultar_simulacion()
         self.reloj += PASO
         lote = self.medidores.leer(self.reloj)
         self.cola.guardar([lote])
         self.cola.guardar_estado("reloj", self.reloj.isoformat())
         self.cola.guardar_estado("hh", self.medidores.hh)
         resumen = ", ".join(f"{m['variable']}={m['valor']}" for m in lote["mediciones"])
-        self.log(f"{lote['ts']} {resumen}" + ("" if self.enlace else "  [ENLACE CORTADO]"))
+        self.log(f"{lote['ts']} {resumen}" + ("" if self.puede_enviar() else "  [ENLACE CORTADO]"))
         self.vaciar_cola()
 
     def comandos(self):
@@ -274,7 +319,8 @@ class Gateway:
     def correr(self):
         self.log(f"Gateway iniciado → {self.cliente.api} · ciclo {self.ciclo}s = 15 min · reloj {self.reloj:%Y-%m-%d %H:%M}Z")
         self.vaciar_cola()
-        threading.Thread(target=self.comandos, daemon=True).start()
+        if self.consola:  # en un contenedor no hay teclado: se controla desde el panel Demo
+            threading.Thread(target=self.comandos, daemon=True).start()
         while self.activo:
             inicio = time.monotonic()
             self.ciclo_lectura()
@@ -293,6 +339,8 @@ def main():
                    help="segundos reales por ciclo de 15 min (demo 3, real 900)")
     p.add_argument("--cola", help="archivo SQLite de la cola local")
     p.add_argument("--sin-historico", action="store_true", help="no generar las 4 semanas de historial")
+    p.add_argument("--sin-consola", action="store_true",
+                   help="no leer comandos del teclado (contenedor); también se omite si stdin no es una terminal")
     args = p.parse_args()
     if not args.secreto:
         args.secreto = {"oficina_rm": "secreto-rm", "planta": "secreto-planta"}[args.sede]

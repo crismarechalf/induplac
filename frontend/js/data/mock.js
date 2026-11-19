@@ -13,6 +13,6 @@ export function suscribir(callback, onConexion = () => {}) {
   return sim.suscribir(callback);
 }
 
-// Solo existe en el proveedor simulado: controla los escenarios del panel de demo.
-// api.js no lo exporta, por eso el panel no aparece en modo 'api'.
+// Escenarios del panel de demo (simulador local).
+// api.js exporta uno equivalente que controla los gateways a través de la API.
 export const escenarios = sim.escenarios;

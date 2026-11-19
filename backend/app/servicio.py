@@ -7,7 +7,7 @@ reglas → actualizar estado_actual → abrir/cerrar alertas → eventos WebSock
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from . import config, reglas
@@ -186,3 +186,21 @@ def estado_actual(s: Session, sin_datos: set[str] | None = None) -> list[dict]:
                 item["estado"] = "sin_datos"  # ts queda en la hora del último lote recibido
             salida.append(item)
     return salida
+
+
+# ---------------------------------------------------------------- retención
+def podar(s: Session) -> int:
+    """Borra mediciones y lotes con ts más antiguo que RETENCION_DIAS antes de la lectura más nueva.
+
+    Se mide contra el reloj de las lecturas (simulado en la demo, donde 1 día real
+    son ~300 días simulados). Conserva siempre las 4 semanas que usa la regla de consumo.
+    """
+    ultimo = s.scalar(select(func.max(Lote.ts)))
+    if ultimo is None:
+        return 0
+    limite = ultimo - timedelta(days=config.RETENCION_DIAS)
+    borradas = s.execute(delete(Medicion).where(Medicion.ts < limite)).rowcount
+    # Las mediciones de un lote comparten su ts: primero se borran ellas y luego el lote.
+    s.execute(delete(Lote).where(Lote.ts < limite))
+    s.commit()
+    return borradas

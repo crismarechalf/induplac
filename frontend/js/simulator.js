@@ -383,6 +383,11 @@ export const escenarios = {
     }
     emitirEstado();
   },
+  // Estado base con un clic: operación normal + reconectar.
+  restablecer() {
+    escenarios.reconectar();
+    escenarios.normal();
+  },
   resumen() {
     return {
       activos: Object.keys(demo).filter((k) => demo[k]),

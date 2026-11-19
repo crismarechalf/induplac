@@ -198,6 +198,11 @@ select { background: var(--navy); border: 1px solid var(--borde); border-radius:
 .demo-sede select { flex: 1; min-width: 0; }
 .demo-fila { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; }
 .demo-resumen { font-size: .8rem; color: var(--texto-2); }
+.demo-acciones, .demo-acceso { display: grid; gap: .5rem; }
+.demo-acciones[hidden], .demo-acceso[hidden] { display: none; }
+.demo-acceso label { display: grid; gap: .25rem; font-size: .9rem; color: var(--texto-2); }
+.demo-acceso input { font: inherit; color: inherit; background: var(--navy); border: 1px solid var(--borde); border-radius: 6px; padding: .4rem .5rem; }
+.demo-error { font-size: .8rem; color: #F1A79E; min-height: 1em; }
 
 /* ---------- Pantalla de entrada ---------- */
 .pagina-entrada { display: flex; flex-direction: column; }

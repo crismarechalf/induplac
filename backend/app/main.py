@@ -7,6 +7,9 @@ Endpoints:
   GET  /api/alertas      dashboard ← alertas (activas o historial)
   GET  /api/mediciones   dashboard ← serie histórica para el gráfico
   GET  /api/salud        monitoreo ← API, base de datos y última llegada por sede
+  GET  /api/simulacion   dashboard ← escenarios de demo activos
+  POST /api/simulacion   dashboard → aplica un escenario                [requiere usuario/contraseña de demo]
+  GET  /api/simulacion/{sede}  gateway ← escenarios que debe aplicar   [requiere Bearer de esa sede]
   WS   /ws               dashboard ← eventos {tipo: "estado" | "alerta", data}
 Documentación interactiva (Swagger): /docs
 """
@@ -16,18 +19,20 @@ import os
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
+from typing import Literal
+
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from . import config, servicio
+from . import config, notificador, servicio, simulacion
 from .catalogo import PUNTOS
 from .db import Alerta, Medicion, SesionLocal, crear_tablas, obtener_sesion
-from .notificador import notificar
 from .schemas import LoteEntrada, ResultadoIngesta, TokenEntrada, TokenSalida
-from .seguridad import emitir_token, gateway_actual
+from .seguridad import emitir_token, gateway_actual, operador_demo
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("induplac")
@@ -58,19 +63,28 @@ class Difusor:
 difusor = Difusor()
 
 
+def avisar(aviso: tuple[str, str] | None) -> None:
+    """Envía el correo en un executor: la ingesta nunca espera al SMTP."""
+    if aviso:
+        asyncio.get_running_loop().run_in_executor(None, notificador.enviar, *aviso)
+
+
 async def vigilar_sin_datos():
-    """Cada segundo revisa qué sedes dejaron de enviar y avisa a los dashboards al cambiar."""
+    """Cada segundo revisa qué sedes dejaron de enviar; al cambiar avisa a los dashboards y por correo."""
     anteriores: set[str] = set()
     while True:
         try:
             def revisar():
                 with SesionLocal() as s:
                     actuales = servicio.sedes_sin_datos(s)
-                    return actuales, (servicio.estado_actual(s, actuales) if actuales != anteriores else None)
-            actuales, estado = await run_in_threadpool(revisar)
+                    if actuales == anteriores:
+                        return actuales, None, {}
+                    return actuales, servicio.estado_actual(s, actuales), servicio.ultimo_recibido(s)
+            actuales, estado, recibidos = await run_in_threadpool(revisar)
             if estado is not None:
                 for sede in actuales - anteriores:
                     log.warning("Sede %s sin datos: el gateway dejó de enviar lotes", sede)
+                    avisar(notificador.aviso_sin_datos(sede, recibidos.get(sede)))
                 await difusor.enviar({"tipo": "estado", "data": estado})
                 anteriores = actuales
         except Exception:
@@ -78,12 +92,31 @@ async def vigilar_sin_datos():
         await asyncio.sleep(1)
 
 
+async def podar_periodicamente():
+    """Al arrancar y cada hora borra las mediciones viejas (RETENCION_DIAS).
+
+    Con ciclos de 3 s, 1 hora real son ~12 días simulados: por eso cada hora y no una vez al día.
+    """
+    while True:
+        try:
+            def podar():
+                with SesionLocal() as s:
+                    return servicio.podar(s)
+            borradas = await run_in_threadpool(podar)
+            if borradas:
+                log.info("Retención: %d mediciones de más de %d días borradas", borradas, config.RETENCION_DIAS)
+        except Exception:
+            log.exception("Error en la retención de mediciones")
+        await asyncio.sleep(3600)
+
+
 @asynccontextmanager
 async def ciclo_vida(app: FastAPI):
     crear_tablas()
-    tarea = asyncio.create_task(vigilar_sin_datos())
+    tareas = [asyncio.create_task(vigilar_sin_datos()), asyncio.create_task(podar_periodicamente())]
     yield
-    tarea.cancel()
+    for tarea in tareas:
+        tarea.cancel()
 
 
 app = FastAPI(title="Induplac API", version="1.0.0", lifespan=ciclo_vida,
@@ -120,9 +153,11 @@ async def recibir_lotes(cuerpo: LoteEntrada | list[LoteEntrada], gw: dict = Depe
     aceptados, descartados, eventos, nuevas = await run_in_threadpool(procesar)
     for evento in eventos:
         await difusor.enviar(evento)
+    # Correo solo si la alerta crítica sigue activa al terminar el request: así no salen avisos
+    # por la carga del historial ni por alertas que se abren y cierran dentro del mismo reenvío.
     for alerta in nuevas:
-        if alerta.nivel == "critico":
-            asyncio.get_running_loop().run_in_executor(None, notificar, servicio.alerta_a_dict(alerta))
+        if alerta.nivel == "critico" and alerta.activa:
+            avisar(notificador.aviso_alerta(servicio.alerta_a_dict(alerta)))
     log.info("%s: %d lote(s) aceptado(s), %d descartado(s)", gw["sub"], aceptados, descartados)
     return ResultadoIngesta(aceptados=aceptados, descartados=descartados)
 
@@ -169,6 +204,34 @@ def salud(s: Session = Depends(obtener_sesion)):
     return {"api": "ok", "base_datos": "ok", "version": app.version,
             "sedes": {sede: {"ultimo_lote_recibido": servicio.iso(recibidos[sede]) if sede in recibidos else None,
                              "sin_datos": sede in sin_datos} for sede in PUNTOS}}
+
+
+# --------------------------------------------------------------- simulación (panel "Demo")
+class AccionSimulacion(BaseModel):
+    accion: Literal[simulacion.ACCIONES]
+    sede: Literal[tuple(PUNTOS)] | None = None
+
+
+@app.get("/api/simulacion", tags=["demo"])
+def get_simulacion():
+    return simulacion.resumen()
+
+
+@app.post("/api/simulacion", tags=["demo"], dependencies=[Depends(operador_demo)])
+def post_simulacion(datos: AccionSimulacion):
+    if datos.accion in simulacion.ACCIONES_CON_SEDE and not datos.sede:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"La acción {datos.accion} requiere la sede")
+    log.info("Demo: %s %s", datos.accion, datos.sede or "")
+    return simulacion.aplicar(datos.accion, datos.sede)
+
+
+@app.get("/api/simulacion/{sede}", tags=["demo"])
+def get_simulacion_sede(sede: str, gw: dict = Depends(gateway_actual)):
+    if sede not in PUNTOS:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"sede desconocida: {sede}")
+    if sede != gw["sede"]:
+        raise HTTPException(status.HTTP_403_FORBIDDEN, f"El gateway {gw['sub']} solo puede consultar {gw['sede']}")
+    return simulacion.para_sede(sede)
 
 
 @app.websocket("/ws")
