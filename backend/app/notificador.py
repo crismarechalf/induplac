@@ -80,6 +80,16 @@ def aviso_sin_datos(sede: str, ultimo_recibido: datetime | None) -> tuple[str, s
     return asunto, cuerpo
 
 
+def aviso_incidente(incidente: dict) -> tuple[str, str]:
+    """Correo de un incidente registrado. Sin enfriamiento: cada incidente se avisa."""
+    asunto = f"[Induplac] INCIDENTE · {NOMBRE_SEDE[incidente['sede']]} · {incidente['tipo']}"
+    ocurrio = _hora_local(datetime.fromisoformat(incidente["ts"].rstrip("Z")))
+    cuerpo = (f"{incidente['descripcion']}\n\nOcurrió: {ocurrio} (hora real de Chile)\n"
+              f"Registrado por: {incidente['registrado_por']}\n"
+              f"Las HH sin incidentes de {NOMBRE_SEDE[incidente['sede']]} vuelven a 0.\n{_pie()}")
+    return asunto, cuerpo
+
+
 def _enviar_smtp(asunto: str, cuerpo: str) -> None:
     """Envía o lanza la excepción tal cual (la usa el comando --prueba)."""
     para = destinatarios()

@@ -1,11 +1,13 @@
 // Orquestador del dashboard: conecta el proveedor de datos con los componentes de UI.
-// No contiene reglas de negocio: los estados y alertas llegan calculados del proveedor.
+// No contiene reglas de negocio ni filtra datos: el servidor entrega solo lo que el rol puede ver.
 import { proveedor } from './data/index.js';
-import { PERFILES, leerPerfil, borrarPerfil, puedeVer } from './perfiles.js';
+import { cerrarSesion, guardarSesion, leerSesion, tienePermiso } from './sesion.js';
 import { montarSedes, pintarEstado } from './ui/tarjetas.js';
 import { pintarAlertas } from './ui/alertas.js';
 import { montarGrafico } from './ui/grafico.js';
-import { montarDemo } from './ui/demo.js';
+import { montarConsola } from './ui/consola.js';
+import { montarFormularioIncidente, montarIncidentes } from './ui/incidentes.js';
+import { hora } from './ui/formato.js';
 
 const $ = (sel) => document.querySelector(sel);
 
@@ -22,50 +24,103 @@ function pintarConexion(estado) {
   el.querySelector('.conexion-texto').textContent = TEXTO_CONEXION[estado];
 }
 
-const perfil = PERFILES[leerPerfil()];
-if (!perfil) location.replace('index.html');
+// Reloj de simulación único (lo manda el servidor). Se sincroniza cada 30 s y avanza localmente
+// con el factor entre medio, para que "Hora simulada" se vea fluida.
+function montarReloj() {
+  let base = null; // { simulada: ms, real: ms, factor }
+  const sincronizar = async () => {
+    try {
+      const r = await proveedor.getReloj();
+      base = { simulada: Date.parse(r.hora_simulada), real: Date.now(), factor: r.factor };
+    } catch (err) {
+      console.error('No se pudo leer el reloj', err);
+    }
+  };
+  const actual = () => (base ? new Date(base.simulada + (Date.now() - base.real) * base.factor) : null);
+  sincronizar();
+  setInterval(sincronizar, 30000);
+  setInterval(() => {
+    const h = actual();
+    if (h) $('#hora-simulada').textContent = hora(h);
+  }, 1000);
+  return actual;
+}
+
+if (!leerSesion()) location.replace('index.html');
 else iniciar();
 
 async function iniciar() {
-  $('#perfil-nombre').textContent = perfil.nombre;
+  // Perfil vigente según el servidor (si el token venció, api.js lleva de vuelta al login).
+  const actualizado = await proveedor.yo().catch(() => null);
+  if (actualizado) guardarSesion({ ...leerSesion(), usuario: actualizado });
+  const { usuario } = leerSesion();
+
+  $('#usuario-nombre').textContent = usuario.nombre;
+  $('#usuario-rol').textContent = usuario.rol_nombre;
   $('#salir').addEventListener('click', () => {
-    borrarPerfil();
-    location.href = 'index.html';
+    cerrarSesion();
+    location.replace('index.html');
   });
 
-  // Filtro de visibilidad por perfil (qué se muestra, no cómo se evalúa).
-  const visible = (x) => puedeVer(perfil, x.sede, x.variable);
-
+  // La vista (sedes y variables) la define el rol en el servidor.
+  const perfil = { ver: usuario.vista };
   montarSedes($('#sedes'), perfil);
   const grafico = montarGrafico($('#historico'), perfil, proveedor);
   const alertas = new Map();
   const repintarAlertas = () => pintarAlertas($('#lista-alertas'), $('#total-alertas'), alertas.values());
+  const ultimos = new Map(); // último estado de cada punto, para la consola
+
+  const horaSimulada = proveedor.getReloj ? montarReloj() : () => null;
+  if (!proveedor.getReloj) $('.hora-simulada').hidden = true;
+
+  const incidentes = tienePermiso('incidentes_ver') && proveedor.getIncidentes
+    ? montarIncidentes($('#incidentes'), proveedor) : null;
+  if (tienePermiso('incidentes_registrar') && proveedor.registrarIncidente) {
+    montarFormularioIncidente($('#btn-incidente'), proveedor);
+  }
+  const consola = tienePermiso('consola') && proveedor.consola
+    ? montarConsola({
+        boton: $('#btn-consola'),
+        proveedor,
+        valorActual: (sede, variable) => ultimos.get(`${sede}|${variable}`),
+        horaSimulada,
+      })
+    : null;
+
+  function aplicarEstado(items) {
+    pintarEstado(items);
+    for (const it of items) ultimos.set(`${it.sede}|${it.variable}`, it);
+    consola?.actualizarValores();
+  }
 
   // Carga completa: al inicio y cada vez que el WebSocket se reconecta.
   async function sincronizar() {
     try {
       const [estado, activas] = await Promise.all([proveedor.getEstado(), proveedor.getAlertas({ activas: true })]);
-      pintarEstado(estado.filter(visible));
+      aplicarEstado(estado);
       alertas.clear();
-      activas.filter(visible).forEach((a) => alertas.set(a.id, a));
+      activas.forEach((a) => alertas.set(a.id, a));
       repintarAlertas();
       grafico.actualizar(estado);
+      incidentes?.cargar();
     } catch (err) {
       console.error('No se pudo sincronizar', err);
       pintarConexion('error');
     }
   }
 
-  // Eventos en tiempo real. `data` puede venir como objeto o como lista.
+  // Eventos en tiempo real, ya filtrados por rol en el servidor. `data` puede venir como objeto o lista.
   proveedor.suscribir(
     (evento) => {
       const datos = [].concat(evento.data);
       if (evento.tipo === 'estado') {
-        pintarEstado(datos.filter(visible));
+        aplicarEstado(datos);
         grafico.actualizar(datos);
       } else if (evento.tipo === 'alerta') {
-        for (const a of datos.filter(visible)) a.activa ? alertas.set(a.id, a) : alertas.delete(a.id);
+        for (const a of datos) a.activa ? alertas.set(a.id, a) : alertas.delete(a.id);
         repintarAlertas();
+      } else if (evento.tipo === 'incidente') {
+        datos.forEach((i) => incidentes?.agregar(i));
       }
     },
     (estadoConexion) => {
@@ -75,7 +130,4 @@ async function iniciar() {
   );
 
   await sincronizar();
-
-  // Panel de demo: con el simulador o con la API (ahí pide usuario y contraseña).
-  if (proveedor.escenarios) montarDemo(proveedor.escenarios);
 }

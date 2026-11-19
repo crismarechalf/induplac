@@ -42,11 +42,37 @@ def referencia_hora(serie: dict[datetime, float], fin: datetime) -> float | None
     return sum(previas) / len(previas) if previas else None
 
 
-def evaluar_consumo(actual: float | None, referencia: float | None) -> str:
+def evaluar_consumo(actual: float | None, referencia: float | None, piso: float = 0) -> str:
+    """Crítico si supera la referencia en más de 20% Y el exceso absoluto llega al piso.
+
+    El piso (catalogo.PISO_EXCESO) evita los falsos positivos con consumos bajos,
+    donde el ruido normal ya supera el 20% (ej. agua de noche).
+    """
     # Sin historial suficiente no se puede afirmar que hay un exceso: se informa normal.
     if actual is None or not referencia:
         return "normal"
-    return "critico" if actual > referencia * UMBRAL_CONSUMO else "normal"
+    return "critico" if actual > referencia * UMBRAL_CONSUMO and actual - referencia >= piso else "normal"
+
+
+def en_turno(turno: tuple[tuple[int, ...], int, int], local: datetime) -> bool:
+    dias, desde, hasta = turno
+    return local.weekday() in dias and desde <= local.hour < hasta
+
+
+def evaluar_produccion(lecturas: list[tuple[datetime, float, bool]]) -> tuple[str, datetime | None]:
+    """Línea detenida: producción 0 en 2 lecturas seguidas, ambas dentro del turno.
+
+    `lecturas`: las 2 últimas (ts local, valor, en_turno), de la más antigua a la más nueva.
+    Devuelve (estado, desde): desde = hora de la primera lectura en 0.
+    """
+    if len(lecturas) == 2 and lecturas[1][0] - lecturas[0][0] == PASO \
+            and all(valor == 0 and turno for _, valor, turno in lecturas):
+        return "advertencia", lecturas[0][0]
+    return "normal", None
+
+
+def mensaje_linea_detenida(desde_local: datetime) -> str:
+    return f"Línea de producción detenida desde {desde_local:%H:%M}."
 
 
 def evaluar_uv(valor: float) -> str:

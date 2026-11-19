@@ -1,60 +1,60 @@
-"""Panel "Demo": POST /api/simulacion (usuario y contraseña) y GET /api/simulacion/{sede} (gateway)."""
-import base64
+"""Consola de operación y pruebas (solo admin) y lo que recibe cada gateway."""
+from tests.conftest import token, usuario
 
-from tests.conftest import token
-
-
-def basic(usuario="profe", clave="prueba"):
-    return {"Authorization": "Basic " + base64.b64encode(f"{usuario}:{clave}".encode()).decode()}
+RM = ("gw-oficina-rm", "secreto-rm")
 
 
-def accion(cliente, nombre, sede=None, auth=None):
-    cuerpo = {"accion": nombre} | ({"sede": sede} if sede else {})
-    return cliente.post("/api/simulacion", json=cuerpo, headers=basic() if auth is None else auth)
+def put(cliente, sede, cambios, quien="admin"):
+    return cliente.put(f"/api/simulacion/{sede}", json=cambios, headers=usuario(cliente, quien))
 
 
-def test_simulacion_exige_usuario_y_clave(cliente):
-    assert accion(cliente, "picoElectrico", auth={}).status_code == 401
-    assert accion(cliente, "picoElectrico", auth=basic(clave="otra")).status_code == 401
-    assert accion(cliente, "picoElectrico", auth=basic(usuario="otro")).status_code == 401
-    r = accion(cliente, "picoElectrico", auth={})
-    assert "www-authenticate" not in r.headers  # sin ventana de login del navegador
-    assert cliente.get("/api/simulacion").json() == {"activos": [], "desconectadas": []}
+def test_consola_solo_admin(cliente):
+    assert cliente.get("/api/simulacion").status_code == 401
+    for rol in ("jefatura", "prevencion", "personal_planta"):
+        h = usuario(cliente, rol)
+        assert cliente.get("/api/simulacion", headers=h).status_code == 403
+        assert put(cliente, "planta", {"electricidad_pct": 50}, rol).status_code == 403
+        assert cliente.post("/api/simulacion/restablecer", headers=h).status_code == 403
+    assert cliente.get("/api/simulacion", headers=usuario(cliente)).status_code == 200
 
 
-def test_gateway_solo_consulta_su_sede(cliente):
-    assert cliente.get("/api/simulacion/planta").status_code == 401
-    assert cliente.get("/api/simulacion/oficina_rm", headers=token(cliente)).status_code == 403
-    assert cliente.get("/api/simulacion/planta", headers=token(cliente)).status_code == 200
+def test_consola_valida_rangos(cliente):
+    assert put(cliente, "planta", {"electricidad_pct": 105}).status_code == 422
+    assert put(cliente, "planta", {"agua_pct": -60}).status_code == 422
+    assert put(cliente, "planta", {"produccion_pct": 160}).status_code == 422
+    assert put(cliente, "planta", {"uv_forzado": 15}).status_code == 422
+    assert put(cliente, "planta", {"explotar": True}).status_code == 422
+    assert put(cliente, "planta", {"electricidad_pct": None}).status_code == 422
+    assert put(cliente, "planta", {}).status_code == 422
 
 
-def test_escenarios_acumulables_y_normal(cliente):
-    accion(cliente, "picoElectrico")
-    accion(cliente, "picoAgua")
-    r = accion(cliente, "uvAlto")
-    assert r.status_code == 200 and r.json()["activos"] == ["picoElectrico", "picoAgua", "uvAlto"]
+def test_consola_rechaza_variable_inexistente_en_la_sede(cliente):
+    # La Oficina RM no tiene línea de producción ni sensor UV.
+    assert put(cliente, "oficina_rm", {"uv_forzado": 9}).status_code == 422
+    assert put(cliente, "oficina_rm", {"produccion_pct": 50}).status_code == 422
+    r = cliente.get("/api/simulacion", headers=usuario(cliente)).json()
+    assert r["controles"]["oficina_rm"] == ["electricidad_pct", "agua_pct", "enlace_cortado"]
+
+
+def test_gateway_recibe_los_cambios_de_su_sede(cliente):
+    r = put(cliente, "planta", {"electricidad_pct": 50, "produccion_pct": 0, "uv_forzado": 9.5, "enlace_cortado": True})
+    assert r.status_code == 200 and r.json()["sedes"]["planta"]["electricidad_pct"] == 50
     planta = cliente.get("/api/simulacion/planta", headers=token(cliente)).json()
-    rm = cliente.get("/api/simulacion/oficina_rm", headers=token(cliente, "gw-oficina-rm", "secreto-rm")).json()
-    assert planta["pico_electrico"] and planta["uv_forzado"] == 9 and not planta["pico_agua"]
-    assert rm["pico_agua"] and not rm["pico_electrico"] and rm["uv_forzado"] is None
-    accion(cliente, "desconectar", "planta")
-    assert accion(cliente, "normal").json() == {"activos": [], "desconectadas": ["planta"]}  # normal no reconecta
+    assert planta == {"electricidad_pct": 50, "agua_pct": 0, "produccion_pct": 0, "uv_forzado": 9.5,
+                      "enlace_cortado": True, "incidente_id": 0}
+    rm = cliente.get("/api/simulacion/oficina_rm", headers=token(cliente, *RM)).json()
+    assert rm["electricidad_pct"] == 0 and rm["enlace_cortado"] is False
+    assert cliente.get("/api/simulacion/oficina_rm", headers=token(cliente)).status_code == 403
+    assert cliente.get("/api/simulacion/planta").status_code == 401
 
 
-def test_desconectar_reconectar_e_incidente(cliente):
-    assert accion(cliente, "desconectar").status_code == 422  # requiere sede
-    accion(cliente, "desconectar", "oficina_rm")
-    h = token(cliente, "gw-oficina-rm", "secreto-rm")
-    assert cliente.get("/api/simulacion/oficina_rm", headers=h).json()["desconectado"] is True
-    accion(cliente, "registrarIncidente", "oficina_rm")
-    accion(cliente, "registrarIncidente", "oficina_rm")
-    assert cliente.get("/api/simulacion/oficina_rm", headers=h).json()["incidente_id"] == 2
-    accion(cliente, "reconectar")
-    assert cliente.get("/api/simulacion/oficina_rm", headers=h).json()["desconectado"] is False
-
-
-def test_restablecer_vuelve_al_estado_base(cliente):
-    accion(cliente, "uvAlto")
-    accion(cliente, "desconectar", "planta")
-    assert accion(cliente, "restablecer").json() == {"activos": [], "desconectadas": []}
-    assert accion(cliente, "explotar").status_code == 422  # acción inexistente
+def test_restablecer_y_registro_de_acciones(cliente):
+    put(cliente, "planta", {"uv_forzado": 12})
+    put(cliente, "oficina_rm", {"agua_pct": 80})
+    r = cliente.post("/api/simulacion/restablecer", headers=usuario(cliente)).json()
+    assert r["sedes"]["planta"] == {"electricidad_pct": 0, "agua_pct": 0, "produccion_pct": 100,
+                                    "uv_forzado": None, "enlace_cortado": False}
+    assert r["sedes"]["oficina_rm"]["agua_pct"] == 0
+    assert [a["accion"] for a in r["registro"]] == ["restablecer", "consola", "consola"]
+    assert r["registro"][1]["detalle"] == {"sede": "oficina_rm", "agua_pct": 80}
+    assert r["registro"][0]["usuario"] == "admin"

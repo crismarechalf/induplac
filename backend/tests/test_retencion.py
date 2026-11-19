@@ -3,7 +3,7 @@ from datetime import timedelta
 
 from app import servicio
 from app.db import SesionLocal
-from tests.conftest import token
+from tests.conftest import token, token_usuario, usuario
 from tests.test_api import T0, lote
 
 
@@ -14,5 +14,5 @@ def test_retencion_borra_mediciones_antiguas(cliente):
     cliente.post("/api/lotes", json=viejas + recientes, headers=h)
     with SesionLocal() as s:
         assert servicio.podar(s) == 10  # 2 lotes x 5 mediciones
-    serie = cliente.get("/api/mediciones", params={"sede": "planta", "variable": "electricidad"}).json()
+    serie = cliente.get("/api/mediciones", headers=usuario(cliente), params={"sede": "planta", "variable": "electricidad"}).json()
     assert len(serie) == 2 and serie[0]["ts"].startswith("2027-01-18")

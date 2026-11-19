@@ -1,32 +1,78 @@
-// Proveedor real (EVA 3): backend FastAPI vía fetch + WebSocket.
-// Mismo contrato que mock.js. Aún no se usa: se activa con DATA_SOURCE = 'api' en config.js.
+// Proveedor real: backend FastAPI vía fetch + WebSocket, con el token del usuario.
+// Mismo contrato de lectura que mock.js. Se activa con DATA_SOURCE = 'api' en config.js.
+// El servidor filtra todo según el rol del token: el frontend nunca filtra datos.
 import { API_BASE_URL, WS_URL } from '../config.js';
+import { leerSesion, sesionExpirada } from '../sesion.js';
 
-// GET con parámetros de consulta; omite los que vienen vacíos.
-async function obtener(ruta, params = {}) {
+// Petición con el token Bearer. 401 → la sesión venció: de vuelta al login.
+async function pedir(ruta, { metodo = 'GET', params = {}, cuerpo } = {}) {
   const url = new URL(API_BASE_URL + ruta, location.href);
   for (const [clave, valor] of Object.entries(params)) {
     if (valor !== undefined && valor !== null && valor !== '') url.searchParams.set(clave, valor);
   }
-  const respuesta = await fetch(url, { headers: { Accept: 'application/json' } });
-  if (!respuesta.ok) throw new Error(`${ruta} respondió ${respuesta.status}`);
+  const headers = { Accept: 'application/json' };
+  const token = leerSesion()?.token;
+  if (token) headers.Authorization = `Bearer ${token}`;
+  if (cuerpo !== undefined) headers['Content-Type'] = 'application/json';
+  const respuesta = await fetch(url, { method: metodo, headers, body: cuerpo === undefined ? undefined : JSON.stringify(cuerpo) });
+  if (respuesta.status === 401 && token) {
+    sesionExpirada();
+    throw new Error('Sesión vencida');
+  }
+  if (!respuesta.ok) {
+    const detalle = await respuesta.json().catch(() => ({}));
+    throw Object.assign(new Error(mensajeError(detalle, respuesta.status)), { status: respuesta.status });
+  }
   return respuesta.json();
 }
 
+// FastAPI responde { detail: "texto" } o { detail: [{ msg }] } (validación).
+function mensajeError(detalle, status) {
+  if (typeof detalle.detail === 'string') return detalle.detail;
+  if (Array.isArray(detalle.detail)) return detalle.detail.map((d) => d.msg).join('. ');
+  return `El servidor respondió ${status}`;
+}
+
+// ---------- Sesión ----------
+// POST /api/auth/login → { access_token, usuario: { usuario, nombre, rol, rol_nombre, vista, permisos } }
+export async function login(usuario, clave) {
+  const r = await pedir('/api/auth/login', { metodo: 'POST', cuerpo: { usuario, clave } });
+  return { token: r.access_token, usuario: r.usuario };
+}
+
+// GET /api/yo → perfil actualizado del usuario del token
+export const yo = () => pedir('/api/yo');
+
+// ---------- Lectura (filtrada por rol en el servidor) ----------
 // GET /api/estado → [{ sede, variable, valor, unidad, estado, ts }]
-export const getEstado = () => obtener('/api/estado');
+export const getEstado = () => pedir('/api/estado');
 
 // GET /api/alertas?activas=true → [{ id, sede, variable, nivel, mensaje, ts, activa }]
-export const getAlertas = ({ activas } = {}) => obtener('/api/alertas', { activas });
+export const getAlertas = ({ activas } = {}) => pedir('/api/alertas', { params: { activas } });
 
 // GET /api/mediciones?sede=&variable=&desde= → [{ sede, variable, valor, unidad, ts }]
 export const getMediciones = ({ sede, variable, desde } = {}) =>
-  obtener('/api/mediciones', { sede, variable, desde });
+  pedir('/api/mediciones', { params: { sede, variable, desde } });
 
+// GET /api/reloj → { hora_simulada, factor }
+export const getReloj = () => pedir('/api/reloj');
+
+// ---------- Incidentes ----------
+export const getIncidentes = () => pedir('/api/incidentes', { params: { limite: 5 } });
+export const registrarIncidente = (datos) => pedir('/api/incidentes', { metodo: 'POST', cuerpo: datos });
+
+// ---------- Consola de operación (solo admin) ----------
+export const consola = {
+  obtener: () => pedir('/api/simulacion'),
+  cambiar: (sede, cambios) => pedir(`/api/simulacion/${sede}`, { metodo: 'PUT', cuerpo: cambios }),
+  restablecer: () => pedir('/api/simulacion/restablecer', { metodo: 'POST' }),
+};
+
+// ---------- Tiempo real ----------
 // WebSocket con reconexión automática (espera creciente hasta 30 s).
-// Cada mensaje del servidor debe ser JSON: { tipo: 'estado' | 'alerta', data }.
-// onConexion recibe 'conectado' | 'reconectando' para el indicador del header;
-// la UI vuelve a pedir el estado completo al reconectar, por si se perdieron eventos.
+// Eventos: { tipo: 'estado' | 'alerta' | 'incidente', data }, ya filtrados por rol en el servidor.
+// onConexion recibe 'conectado' | 'reconectando'; la UI vuelve a pedir el estado al reconectar.
+// Cierre 4401 = token inválido o vencido → login.
 export function suscribir(callback, onConexion = () => {}) {
   let ws;
   let espera = 1000;
@@ -34,7 +80,7 @@ export function suscribir(callback, onConexion = () => {}) {
   let cancelado = false;
 
   const conectar = () => {
-    ws = new WebSocket(WS_URL);
+    ws = new WebSocket(`${WS_URL}?token=${encodeURIComponent(leerSesion()?.token ?? '')}`);
     ws.onopen = () => {
       espera = 1000;
       onConexion('conectado');
@@ -46,8 +92,9 @@ export function suscribir(callback, onConexion = () => {}) {
         console.error('Evento WebSocket inválido', err);
       }
     };
-    ws.onclose = () => {
+    ws.onclose = (e) => {
       if (cancelado) return;
+      if (e.code === 4401) return sesionExpirada();
       onConexion('reconectando');
       temporizador = setTimeout(conectar, espera);
       espera = Math.min(espera * 2, 30000);
@@ -61,74 +108,3 @@ export function suscribir(callback, onConexion = () => {}) {
     ws?.close();
   };
 }
-
-// ---------- Panel "Demo" (manipular resultados durante la presentación) ----------
-// Misma interfaz que `escenarios` del simulador (mock.js), más el manejo de credenciales.
-// POST /api/simulacion exige usuario y contraseña (DEMO_USUARIO / DEMO_CLAVE del servidor),
-// que viajan en la cabecera Authorization: Basic y se guardan solo en sessionStorage.
-
-const CLAVE_SESION = 'induplac.demo';
-let credencialesEnMemoria = null; // respaldo si el navegador bloquea sessionStorage
-let ultimoResumen = { activos: [], desconectadas: [] };
-
-function leerCredenciales() {
-  try {
-    return sessionStorage.getItem(CLAVE_SESION) ?? credencialesEnMemoria;
-  } catch {
-    return credencialesEnMemoria;
-  }
-}
-
-function borrarCredenciales() {
-  credencialesEnMemoria = null;
-  try {
-    sessionStorage.removeItem(CLAVE_SESION);
-  } catch {
-    /* sin almacenamiento: basta con la memoria */
-  }
-}
-
-async function simular(accion, sede) {
-  const respuesta = await fetch(new URL(API_BASE_URL + '/api/simulacion', location.href), {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', Authorization: `Basic ${leerCredenciales() ?? ''}` },
-    body: JSON.stringify(sede ? { accion, sede } : { accion }),
-  });
-  if (respuesta.status === 401) {
-    borrarCredenciales();
-    // demo.js reconoce este nombre y vuelve a mostrar el formulario.
-    throw Object.assign(new Error('Usuario o contraseña incorrectos'), { name: 'CredencialesInvalidas' });
-  }
-  if (!respuesta.ok) throw new Error(`/api/simulacion respondió ${respuesta.status}`);
-  ultimoResumen = await respuesta.json();
-  return ultimoResumen;
-}
-
-export const escenarios = {
-  requiereCredenciales: true,
-  tieneCredenciales: () => Boolean(leerCredenciales()),
-  guardarCredenciales(usuario, clave) {
-    // btoa solo acepta latin-1: se pasa por UTF-8 para admitir tildes y ñ.
-    const bytes = new TextEncoder().encode(`${usuario}:${clave}`);
-    credencialesEnMemoria = btoa(String.fromCharCode(...bytes));
-    try {
-      sessionStorage.setItem(CLAVE_SESION, credencialesEnMemoria);
-    } catch {
-      /* queda en memoria mientras la página esté abierta */
-    }
-  },
-  // Trae el resumen al abrir el panel; resumen() lo devuelve de forma síncrona.
-  async actualizar() {
-    ultimoResumen = await obtener('/api/simulacion');
-    return ultimoResumen;
-  },
-  resumen: () => ultimoResumen,
-  normal: () => simular('normal'),
-  picoElectrico: () => simular('picoElectrico'),
-  picoAgua: () => simular('picoAgua'),
-  uvAlto: () => simular('uvAlto'),
-  desconectar: (sede) => simular('desconectar', sede),
-  registrarIncidente: (sede) => simular('registrarIncidente', sede),
-  reconectar: () => simular('reconectar'),
-  restablecer: () => simular('restablecer'),
-};

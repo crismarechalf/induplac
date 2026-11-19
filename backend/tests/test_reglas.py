@@ -61,3 +61,35 @@ def test_uv_niveles_oms():
 def test_mensaje_consumo_formato_chileno():
     m = reglas.mensaje_consumo(1250, 1000, "kWh", 2, "electricidad")
     assert "1.250,0 kWh" in m and "25,0%" in m and "miércoles" in m
+
+
+# ------------------------------------------------ piso de exceso absoluto (issue #2)
+def test_exceso_bajo_el_piso_no_alerta():
+    # Agua de noche en la Oficina RM: 50 L vs 40 L es +25%, pero solo 10 L de exceso (piso 48 L).
+    assert reglas.evaluar_consumo(50, 40, piso=48) == "normal"
+
+
+def test_exceso_sobre_el_piso_alerta():
+    # Agua en turno: 600 L vs 480 L es +25% y 120 L de exceso (sobre el piso de 48 L).
+    assert reglas.evaluar_consumo(600, 480, piso=48) == "critico"
+
+
+# ------------------------------------------------ línea de producción detenida
+LUNES_10 = datetime(2026, 11, 16, 10, 0)  # lunes 10:00, dentro del turno de la Planta
+
+
+def test_linea_detenida_en_turno_es_advertencia():
+    lecturas = [(LUNES_10, 0, True), (LUNES_10 + timedelta(minutes=15), 0, True)]
+    estado, desde = reglas.evaluar_produccion(lecturas)
+    assert estado == "advertencia" and desde == LUNES_10
+    assert reglas.mensaje_linea_detenida(desde) == "Línea de producción detenida desde 10:00."
+
+
+def test_linea_detenida_requiere_2_lecturas_en_turno():
+    t1 = LUNES_10 + timedelta(minutes=15)
+    assert reglas.evaluar_produccion([(LUNES_10, 40, True), (t1, 0, True)])[0] == "normal"   # 1 sola en 0
+    assert reglas.evaluar_produccion([(LUNES_10, 0, False), (t1, 0, False)])[0] == "normal"  # fuera de turno
+    assert reglas.evaluar_produccion([(LUNES_10, 0, True), (t1, 45, True)])[0] == "normal"   # volvió a producir
+    assert reglas.evaluar_produccion([(LUNES_10, 0, True)])[0] == "normal"
+    assert reglas.en_turno(((0, 1, 2, 3, 4, 5), 6, 22), LUNES_10)
+    assert not reglas.en_turno(((0, 1, 2, 3, 4, 5), 6, 22), datetime(2026, 11, 22, 10, 0))  # domingo

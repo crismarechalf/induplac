@@ -16,7 +16,8 @@ Nada queda corriendo en un notebook. **Nada de la instancia es irremplazable**: 
    | `SMTP_USER` | El Gmail que envía los avisos |
    | `SMTP_PASS` | La contraseña de aplicación (con o sin espacios) |
    | `ALERTA_DESTINO` | Opcional. Correos que reciben los avisos, separados por coma. Vacío = `SMTP_USER` |
-   | `DEMO_USUARIO` / `DEMO_CLAVE` | Usuario y contraseña del panel **Demo** del dashboard (obligatorios). Sin comillas simples |
+   | `ADMIN_USUARIO` / `ADMIN_CLAVE` | Usuario y contraseña del administrador (consola de operación y auditoría). Sin comillas simples |
+   | `USUARIOS_CLAVE` | Contraseña inicial de `jefatura`, `prevencion`, `personal_rm` y `personal_planta` |
 
    Estos valores **nunca** se suben al repositorio: solo se pegan en la consola de AWS.
 
@@ -43,7 +44,7 @@ Nada queda corriendo en un notebook. **Nada de la instancia es irremplazable**: 
 
 ## Verificar
 
-- Dashboard: `https://<subdominio>.duckdns.org` → elige un perfil. Debe decir **En línea**.
+- Dashboard: `https://<subdominio>.duckdns.org` → inicia sesión con uno de los usuarios. Debe decir **En línea**.
 - Swagger: `https://<subdominio>.duckdns.org/docs`
 - Salud: `https://<subdominio>.duckdns.org/api/salud`
 - Llega un correo **"[Induplac] Prueba de aviso"**.
@@ -54,7 +55,21 @@ Revisión completa: **EC2 → la instancia → Connect → EC2 Instance Connect 
 sudo /opt/induplac/deploy/verificar.sh
 ```
 
-Muestra ✓ o ✗ para: contenedores, API y base de datos, DuckDNS, HTTPS, lotes recientes de las 2 sedes y API de simulación.
+Muestra ✓ o ✗ para: contenedores, API y base de datos, DuckDNS, HTTPS, lotes recientes de las 2 sedes, login del administrador y consola de operación.
+
+## Usuarios
+
+Se crean solos en el primer arranque. Cambiar una clave: `cd /opt/induplac && sudo docker compose exec api python -m app.usuarios cambiar-clave <usuario>`.
+
+| Usuario | Clave | Ve | Puede |
+|---|---|---|---|
+| `admin` (o `ADMIN_USUARIO`) | `ADMIN_CLAVE` | Todo | Consola de operación y pruebas, auditoría, registrar incidentes |
+| `jefatura` | `USUARIOS_CLAVE` | Ambas sedes, todas las variables, incidentes | Solo ver |
+| `prevencion` | `USUARIOS_CLAVE` | HH sin incidentes de ambas sedes, UV de la Planta, incidentes | Registrar incidentes |
+| `personal_rm` | `USUARIOS_CLAVE` | Solo la Oficina RM | Solo ver |
+| `personal_planta` | `USUARIOS_CLAVE` | Solo la Planta Valparaíso | Solo ver |
+
+5 intentos fallidos de un usuario en 5 minutos lo bloquean durante 5 minutos.
 
 ## Si algo falla
 
@@ -78,28 +93,29 @@ El certificado se guarda en el volumen `caddy_data` y sobrevive a cada parada de
 2. Entra por `http://<subdominio>.duckdns.org:8000` (sin la "s").
 3. Al terminar, borra esa regla.
 
-Por HTTP el usuario y la contraseña del panel Demo viajan sin cifrar: úsalo solo como emergencia.
+Por HTTP las contraseñas viajan sin cifrar: úsalo solo como emergencia.
 
 ## El día de la presentación
 
 1. **Start Lab unos 15 minutos antes.** En el Learner Lab la IP pública cambia cada vez que el lab se detiene y vuelve a iniciar: DuckDNS se actualiza solo al arrancar la instancia y cada 5 minutos.
 2. Si la instancia quedó detenida: **EC2 → Instance state → Start instance**.
 3. Conéctate con EC2 Instance Connect y corre `sudo /opt/induplac/deploy/verificar.sh`. Todo debe salir con ✓.
-4. Abre el dashboard, presiona **D** (o el botón **Demo**) e ingresa el usuario y la contraseña de demo.
-5. **Restablecer todo** deja la simulación en el estado base con un clic.
+4. Inicia sesión como `admin` y abre **Consola** (botón del header). **Restablecer todo** deja la simulación en el estado base con un clic.
 
-### Panel Demo
+### Consola de operación (solo admin)
 
-| Botón | Efecto |
-|---|---|
-| Restablecer todo | Operación normal + reconectar todas las sedes |
-| Operación normal | Apaga los picos y el UV alto (no reconecta) |
-| Pico eléctrico en la Planta | +35%: crítico en 3–4 ciclos (~10 s) y correo |
-| Pico de agua en la Oficina RM | +60% (fuga): crítico y correo |
-| UV alto en la Planta | Índice 9: advertencia |
-| Desconectar (sede elegida) | Esa sede deja de enviar: "Sin datos" en ~6 s y correo |
-| Registrar incidente (sede elegida) | HH sin incidentes de esa sede vuelve a 0 |
-| Reconectar | Las sedes envían la cola acumulada, en orden y sin duplicados |
+Panel lateral con una pestaña por sede. Cada cambio se aplica al soltar el deslizador o al hacer click; queda en el **Registro de acciones** y en la auditoría.
+
+| Control | Sedes | Efecto |
+|---|---|---|
+| Electricidad / Agua · Variación del consumo (−50% a +100%) | ambas | Crítico si la última hora supera +20% del promedio de 4 semanas **y** el exceso supera el piso (10% del consumo típico en turno). De noche el consumo es bajo: para mostrar la alerta, hazlo en horario de turno |
+| Producción · Ritmo de la línea (0% a 150%) y **Parada de línea** | Planta | Advertencia "Línea detenida" si produce 0 en 2 lecturas seguidas dentro del turno (L–S 6–22 h) |
+| Índice UV · Automático / Forzado (0 a 14) | Planta | ≥ 8 advertencia, ≥ 11 crítico |
+| Enlace de la sede · Conectado / Cortado | ambas | La sede sigue midiendo y encola; "Sin datos" a los 2 ciclos y correo. Al reconectar llega la cola en orden y sin duplicados |
+
+### Registrar incidente (prevención y admin)
+
+Botón **Registrar incidente** del header: sede, fecha y hora, tipo y descripción. Reinicia a 0 las HH sin incidentes de esa sede, envía un correo "[Induplac] INCIDENTE · …" y aparece en **Incidentes recientes**.
 
 Correos: como máximo 1 por sede y variable cada 10 minutos (`ALERTA_ENFRIAMIENTO_MIN`).
 
@@ -110,5 +126,26 @@ Desde EC2 Instance Connect:
 ```bash
 cd /opt/induplac && sudo git pull && sudo docker compose up -d --build
 ```
+
+**Desde la versión con panel Demo a la versión con login** (EC2 ya creada):
+
+1. Agrega las variables nuevas al `.env` existente:
+
+   ```bash
+   cd /opt/induplac && sudo nano .env
+   ```
+
+   Al final, agrega (sin espacios alrededor del `=`):
+
+   ```
+   ADMIN_USUARIO='admin'
+   ADMIN_CLAVE='una-clave-para-el-admin'
+   USUARIOS_CLAVE='una-clave-para-los-demas'
+   ```
+
+   Guarda con Ctrl+O, Enter y Ctrl+X. Si no las agregas, la API usa `DEMO_USUARIO` / `DEMO_CLAVE` del `.env` anterior (admin = `DEMO_USUARIO`, el resto de los usuarios con `DEMO_CLAVE`).
+2. Actualiza y reconstruye: `sudo git pull && sudo docker compose up -d --build`.
+3. Las tablas nuevas (usuarios, incidentes, auditoría, config) se crean solas y los datos existentes se conservan. El reloj simulado único arranca después de la última lectura guardada.
+4. Corre `sudo /opt/induplac/deploy/verificar.sh`.
 
 Congelamiento: después del merge del despliegue no hay cambios de código salvo correcciones de errores, hasta la presentación del 25-11.

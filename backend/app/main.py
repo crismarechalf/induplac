@@ -1,61 +1,80 @@
 """API REST + WebSocket de Induplac (FastAPI).
 
 Endpoints:
-  POST /api/auth/token   gateway → token JWT
-  POST /api/lotes        gateway → lote(s) de mediciones           [requiere Bearer]
-  GET  /api/estado       dashboard ← último valor y estado de cada punto
-  GET  /api/alertas      dashboard ← alertas (activas o historial)
-  GET  /api/mediciones   dashboard ← serie histórica para el gráfico
-  GET  /api/salud        monitoreo ← API, base de datos y última llegada por sede
-  GET  /api/simulacion   dashboard ← escenarios de demo activos
-  POST /api/simulacion   dashboard → aplica un escenario                [requiere usuario/contraseña de demo]
-  GET  /api/simulacion/{sede}  gateway ← escenarios que debe aplicar   [requiere Bearer de esa sede]
-  WS   /ws               dashboard ← eventos {tipo: "estado" | "alerta", data}
+  POST /api/auth/token         gateway → token JWT de gateway
+  POST /api/auth/login         dashboard → token JWT de usuario (8 h) + perfil
+  GET  /api/yo                 dashboard ← perfil del usuario del token
+  POST /api/lotes              gateway → lote(s) de mediciones              [Bearer gateway]
+  GET  /api/estado             dashboard ← último valor y estado (según rol)  [Bearer usuario]
+  GET  /api/alertas            dashboard ← alertas (según rol)                [Bearer usuario]
+  GET  /api/mediciones         dashboard ← serie para el gráfico (según rol)  [Bearer usuario]
+  GET  /api/incidentes         dashboard ← incidentes recientes              [prevencion, jefatura, admin]
+  POST /api/incidentes         dashboard → registra un incidente             [prevencion, admin]
+  GET  /api/reloj              ambos ← hora simulada única                   [cualquier token]
+  GET  /api/simulacion         consola ← estado de las dos sedes             [admin]
+  PUT  /api/simulacion/{sede}  consola → ajusta las variables de una sede    [admin]
+  POST /api/simulacion/restablecer  consola → todo en "Automático"          [admin]
+  GET  /api/simulacion/{sede}  gateway ← lo que debe aplicar en su ciclo     [Bearer gateway de esa sede]
+  GET  /api/auditoria          admin ← quién hizo qué y cuándo               [admin]
+  GET  /api/salud              monitoreo ← API, base y última llegada por sede (público, sin datos de negocio)
+  WS   /ws?token=            dashboard ← eventos estado | alerta | incidente (según rol; sin token → 4401)
 Documentación interactiva (Swagger): /docs
 """
 import asyncio
 import logging
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.concurrency import run_in_threadpool
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from . import config, notificador, servicio, simulacion
-from .catalogo import PUNTOS
-from .db import Alerta, Medicion, SesionLocal, crear_tablas, obtener_sesion
+from . import config, notificador, roles, seguridad, servicio, simulacion
+from .catalogo import NOMBRE_SEDE, NOMBRE_VARIABLE, PUNTOS
+from .db import Incidente, SesionLocal, Usuario, crear_tablas, obtener_sesion
 from .schemas import LoteEntrada, ResultadoIngesta, TokenEntrada, TokenSalida
-from .seguridad import emitir_token, gateway_actual, operador_demo
+from .seguridad import cualquier_token, gateway_actual, requiere, usuario_actual
+from .usuarios import sembrar
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 log = logging.getLogger("induplac")
 
 
 # ------------------------------------------------------------- WebSocket
+def filtrar_evento(evento: dict, rol: str) -> dict | None:
+    """Solo lo que el rol puede ver (None = no se envía)."""
+    tipo, data = evento["tipo"], evento["data"]
+    if tipo == "estado":
+        visibles = [e for e in data if roles.puede_ver(rol, e["sede"], e["variable"])]
+        return {"tipo": tipo, "data": visibles} if visibles else None
+    if tipo == "alerta":
+        return evento if roles.puede_ver(rol, data["sede"], data["variable"]) else None
+    if tipo == "incidente":
+        return evento if roles.tiene_permiso(rol, "incidentes_ver") else None
+    return None
+
+
 class Difusor:
-    """Mantiene los dashboards conectados y les envía cada evento."""
+    """Mantiene los dashboards conectados (con su rol) y les envía cada evento filtrado."""
 
     def __init__(self):
-        self.clientes: set[WebSocket] = set()
-
-    async def conectar(self, ws: WebSocket):
-        await ws.accept()
-        self.clientes.add(ws)
+        self.clientes: dict[WebSocket, str] = {}
 
     def desconectar(self, ws: WebSocket):
-        self.clientes.discard(ws)
+        self.clientes.pop(ws, None)
 
     async def enviar(self, evento: dict):
-        for ws in list(self.clientes):
+        for ws, rol in list(self.clientes.items()):
+            filtrado = filtrar_evento(evento, rol)
+            if filtrado is None:
+                continue
             try:
-                await ws.send_json(evento)
+                await ws.send_json(filtrado)
             except Exception:
                 self.desconectar(ws)
 
@@ -112,14 +131,17 @@ async def podar_periodicamente():
 
 @asynccontextmanager
 async def ciclo_vida(app: FastAPI):
-    crear_tablas()
+    crear_tablas()  # crea solo las tablas que falten: no toca los datos existentes
+    with SesionLocal() as s:
+        sembrar(s)
+        servicio.iniciar_reloj(s)
     tareas = [asyncio.create_task(vigilar_sin_datos()), asyncio.create_task(podar_periodicamente())]
     yield
     for tarea in tareas:
         tarea.cancel()
 
 
-app = FastAPI(title="Induplac API", version="1.0.0", lifespan=ciclo_vida,
+app = FastAPI(title="Induplac API", version="2.0.0", lifespan=ciclo_vida,
               description="Ingesta de mediciones IoT de las sedes Oficina RM y Planta Valparaíso.")
 
 
@@ -132,12 +154,53 @@ async def cabeceras_seguridad(request: Request, call_next):
     return respuesta
 
 
-# --------------------------------------------------------------- ingesta
+# --------------------------------------------------------------- autenticación
+class LoginEntrada(BaseModel):
+    usuario: str = Field(min_length=1, max_length=40)
+    clave: str = Field(min_length=1, max_length=200)
+
+
+def perfil(u: Usuario | dict) -> dict:
+    """Lo que el dashboard necesita para armar la pantalla del usuario."""
+    datos = {"usuario": u.usuario, "nombre": u.nombre, "rol": u.rol, "sede": u.sede} if isinstance(u, Usuario) else u
+    rol = roles.ROLES[datos["rol"]]
+    return {**datos, "rol_nombre": rol["nombre"], "vista": rol["vista"], "permisos": sorted(rol["permisos"])}
+
+
 @app.post("/api/auth/token", response_model=TokenSalida, tags=["gateway"])
 def token(datos: TokenEntrada):
-    return TokenSalida(access_token=emitir_token(datos.gateway_id, datos.secreto), expira_en=config.JWT_MINUTOS * 60)
+    return TokenSalida(access_token=seguridad.emitir_token(datos.gateway_id, datos.secreto),
+                       expira_en=config.JWT_MINUTOS * 60)
 
 
+@app.post("/api/auth/login", tags=["usuarios"])
+def login(datos: LoginEntrada, s: Session = Depends(obtener_sesion)):
+    espera = seguridad.bloqueado(datos.usuario)
+    if espera:
+        servicio.auditar(s, datos.usuario, "login_bloqueado")
+        raise HTTPException(status.HTTP_429_TOO_MANY_REQUESTS,
+                            f"Demasiados intentos fallidos. Intenta de nuevo en {espera // 60 + 1} minuto(s).",
+                            headers={"Retry-After": str(espera)})
+    u = s.scalar(select(Usuario).where(Usuario.usuario == datos.usuario))
+    if not (seguridad.comprobar_clave(datos.clave, u.hash if u else None) and u.activo):
+        seguridad.registrar_fallo(datos.usuario)
+        servicio.auditar(s, datos.usuario, "login_fallido")  # nunca se guarda la clave
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario o contraseña incorrectos")
+    seguridad.limpiar_fallos(datos.usuario)
+    servicio.auditar(s, u.usuario, "login")
+    return {"access_token": seguridad.emitir_token_usuario(u.usuario, u.rol, u.sede), "token_type": "bearer",
+            "expira_en": config.SESION_HORAS * 3600, "usuario": perfil(u)}
+
+
+@app.get("/api/yo", tags=["usuarios"])
+def yo(u: dict = Depends(usuario_actual), s: Session = Depends(obtener_sesion)):
+    fila = s.scalar(select(Usuario).where(Usuario.usuario == u["sub"], Usuario.activo.is_(True)))
+    if not fila:
+        raise HTTPException(status.HTTP_401_UNAUTHORIZED, "Usuario desactivado")
+    return perfil(fila)
+
+
+# --------------------------------------------------------------- ingesta
 @app.post("/api/lotes", response_model=ResultadoIngesta, status_code=status.HTTP_201_CREATED, tags=["gateway"])
 async def recibir_lotes(cuerpo: LoteEntrada | list[LoteEntrada], gw: dict = Depends(gateway_actual)):
     lotes = cuerpo if isinstance(cuerpo, list) else [cuerpo]
@@ -162,38 +225,27 @@ async def recibir_lotes(cuerpo: LoteEntrada | list[LoteEntrada], gw: dict = Depe
     return ResultadoIngesta(aceptados=aceptados, descartados=descartados)
 
 
-# --------------------------------------------------------------- consulta
+# --------------------------------------------------------------- consulta (filtrada por rol)
 @app.get("/api/estado", tags=["dashboard"])
-def get_estado(s: Session = Depends(obtener_sesion)):
-    return servicio.estado_actual(s)
+def get_estado(u: dict = Depends(usuario_actual), s: Session = Depends(obtener_sesion)):
+    return servicio.estado_actual(s, vista=roles.vista(u["rol"]))
 
 
 @app.get("/api/alertas", tags=["dashboard"])
-def get_alertas(activas: bool | None = None, limite: int = Query(200, le=1000), s: Session = Depends(obtener_sesion)):
-    q = select(Alerta).order_by(Alerta.ts.desc()).limit(limite)
-    if activas is not None:
-        q = q.where(Alerta.activa.is_(activas))
-    return [servicio.alerta_a_dict(a) for a in s.scalars(q)]
+def get_alertas(activas: bool | None = None, limite: int = Query(200, ge=1, le=1000),
+                u: dict = Depends(usuario_actual), s: Session = Depends(obtener_sesion)):
+    return servicio.alertas(s, roles.vista(u["rol"]), activas, limite)
 
 
 @app.get("/api/mediciones", tags=["dashboard"])
 def get_mediciones(sede: str | None = None, variable: str | None = None, desde: datetime | None = None,
-                   limite: int = Query(2000, le=10000), s: Session = Depends(obtener_sesion)):
+                   limite: int = Query(2000, ge=1, le=10000),
+                   u: dict = Depends(usuario_actual), s: Session = Depends(obtener_sesion)):
     if sede and sede not in PUNTOS:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"sede desconocida: {sede}")
-    q = select(Medicion)
-    if sede:
-        q = q.where(Medicion.sede == sede)
-    if variable:
-        q = q.where(Medicion.variable == variable)
-    if desde:
-        if desde.tzinfo:
-            desde = desde.astimezone(timezone.utc).replace(tzinfo=None)
-        q = q.where(Medicion.ts >= desde)
-    # Las más recientes primero para respetar el límite, y luego en orden cronológico.
-    filas = list(s.scalars(q.order_by(Medicion.ts.desc()).limit(limite)))[::-1]
-    return [{"sede": m.sede, "variable": m.variable, "valor": m.valor, "unidad": m.unidad, "ts": servicio.iso(m.ts)}
-            for m in filas]
+    if desde and desde.tzinfo:
+        desde = desde.astimezone(timezone.utc).replace(tzinfo=None)
+    return servicio.mediciones(s, roles.vista(u["rol"]), sede, variable, desde, limite)
 
 
 @app.get("/api/salud", tags=["monitoreo"])
@@ -206,37 +258,147 @@ def salud(s: Session = Depends(obtener_sesion)):
                              "sin_datos": sede in sin_datos} for sede in PUNTOS}}
 
 
-# --------------------------------------------------------------- simulación (panel "Demo")
-class AccionSimulacion(BaseModel):
-    accion: Literal[simulacion.ACCIONES]
-    sede: Literal[tuple(PUNTOS)] | None = None
+@app.get("/api/reloj", tags=["dashboard", "gateway"])
+def reloj(_: dict = Depends(cualquier_token), s: Session = Depends(obtener_sesion)):
+    return {"hora_simulada": servicio.iso(servicio.hora_simulada(s)), "factor": servicio.factor_reloj()}
 
 
-@app.get("/api/simulacion", tags=["demo"])
-def get_simulacion():
-    return simulacion.resumen()
+# --------------------------------------------------------------- incidentes
+class IncidenteEntrada(BaseModel):
+    sede: Literal[tuple(PUNTOS)]
+    ts: datetime | None = Field(None, description="Cuándo ocurrió (ISO 8601 con zona). Por defecto, ahora")
+    tipo: Literal[servicio.TIPOS_INCIDENTE]
+    descripcion: str = Field(min_length=10, max_length=500)
+
+    @field_validator("descripcion")
+    @classmethod
+    def sin_espacios_de_mas(cls, v: str) -> str:
+        v = v.strip()
+        if len(v) < 10:
+            raise ValueError("la descripción debe tener al menos 10 caracteres")
+        return v
+
+    @field_validator("ts")
+    @classmethod
+    def a_utc(cls, v: datetime | None) -> datetime | None:
+        if v is None:
+            return v
+        if v.tzinfo is None:
+            raise ValueError("ts debe incluir zona horaria")
+        v = v.astimezone(timezone.utc).replace(tzinfo=None)
+        if v > servicio.ahora_utc() + timedelta(minutes=5):
+            raise ValueError("la fecha del incidente no puede estar en el futuro")
+        return v
 
 
-@app.post("/api/simulacion", tags=["demo"], dependencies=[Depends(operador_demo)])
-def post_simulacion(datos: AccionSimulacion):
-    if datos.accion in simulacion.ACCIONES_CON_SEDE and not datos.sede:
-        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"La acción {datos.accion} requiere la sede")
-    log.info("Demo: %s %s", datos.accion, datos.sede or "")
-    return simulacion.aplicar(datos.accion, datos.sede)
+@app.get("/api/incidentes", tags=["incidentes"])
+def get_incidentes(limite: int = Query(5, ge=1, le=200), _: dict = Depends(requiere("incidentes_ver")),
+                   s: Session = Depends(obtener_sesion)):
+    return servicio.incidentes(s, limite)
 
 
-@app.get("/api/simulacion/{sede}", tags=["demo"])
-def get_simulacion_sede(sede: str, gw: dict = Depends(gateway_actual)):
+@app.post("/api/incidentes", status_code=status.HTTP_201_CREATED, tags=["incidentes"])
+async def post_incidente(datos: IncidenteEntrada, u: dict = Depends(requiere("incidentes_registrar"))):
+    def guardar():
+        with SesionLocal() as s:
+            ahora = servicio.ahora_utc()
+            i = Incidente(sede=datos.sede, ts=datos.ts or ahora, tipo=datos.tipo, descripcion=datos.descripcion,
+                          registrado_por=u["sub"], creado=ahora)
+            s.add(i)
+            s.commit()
+            d = servicio.incidente_a_dict(i)
+            servicio.auditar(s, u["sub"], "incidente", {"id": d["id"], "sede": d["sede"], "tipo": d["tipo"]})
+            return d
+
+    incidente = await run_in_threadpool(guardar)
+    await difusor.enviar({"tipo": "incidente", "data": incidente})
+    avisar(notificador.aviso_incidente(incidente))
+    log.warning("Incidente en %s (%s) registrado por %s", incidente["sede"], incidente["tipo"], u["sub"])
+    return incidente
+
+
+# --------------------------------------------------------------- consola de operación (admin)
+class CambiosSimulacion(BaseModel):
+    """Solo los campos enviados se cambian. uv_forzado: null = automático."""
+    model_config = ConfigDict(extra="forbid")
+    electricidad_pct: int | None = Field(None, ge=-50, le=100)
+    agua_pct: int | None = Field(None, ge=-50, le=100)
+    produccion_pct: int | None = Field(None, ge=0, le=150)
+    uv_forzado: float | None = Field(None, ge=0, le=14)
+    enlace_cortado: bool | None = None
+
+
+def estado_consola(s: Session) -> dict:
+    return {
+        "sedes": simulacion.todas(),
+        "controles": {sede: simulacion.controles(sede) for sede in PUNTOS},
+        "hora_simulada": servicio.iso(servicio.hora_simulada(s)),
+        "factor": servicio.factor_reloj(),
+        "registro": servicio.auditoria(s, 10, ("consola", "restablecer")),
+    }
+
+
+@app.get("/api/simulacion", tags=["consola"])
+def get_simulacion(_: dict = Depends(requiere("consola")), s: Session = Depends(obtener_sesion)):
+    return estado_consola(s)
+
+
+@app.post("/api/simulacion/restablecer", tags=["consola"])
+def post_restablecer(u: dict = Depends(requiere("consola")), s: Session = Depends(obtener_sesion)):
+    simulacion.restablecer()
+    servicio.auditar(s, u["sub"], "restablecer")
+    log.info("Consola: %s restableció la simulación", u["sub"])
+    return estado_consola(s)
+
+
+@app.put("/api/simulacion/{sede}", tags=["consola"])
+def put_simulacion(sede: str, datos: CambiosSimulacion, u: dict = Depends(requiere("consola")),
+                   s: Session = Depends(obtener_sesion)):
+    if sede not in PUNTOS:
+        raise HTTPException(status.HTTP_404_NOT_FOUND, f"sede desconocida: {sede}")
+    cambios = {campo: getattr(datos, campo) for campo in datos.model_fields_set}
+    if not cambios:
+        raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "No se indicó ningún cambio")
+    for campo, valor in cambios.items():
+        if campo not in simulacion.controles(sede):
+            variable = NOMBRE_VARIABLE[simulacion.VARIABLE_DEL_CONTROL[campo]]
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY,
+                                f"{NOMBRE_SEDE[sede]} no mide {variable}: {campo} no aplica")
+        if valor is None and campo != "uv_forzado":
+            raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, f"{campo} no puede ser null")
+    simulacion.aplicar(sede, cambios)
+    servicio.auditar(s, u["sub"], "consola", {"sede": sede, **cambios})
+    log.info("Consola: %s cambió %s %s", u["sub"], sede, cambios)
+    return estado_consola(s)
+
+
+@app.get("/api/simulacion/{sede}", tags=["gateway"])
+def get_simulacion_sede(sede: str, gw: dict = Depends(gateway_actual), s: Session = Depends(obtener_sesion)):
     if sede not in PUNTOS:
         raise HTTPException(status.HTTP_404_NOT_FOUND, f"sede desconocida: {sede}")
     if sede != gw["sede"]:
         raise HTTPException(status.HTTP_403_FORBIDDEN, f"El gateway {gw['sub']} solo puede consultar {gw['sede']}")
-    return simulacion.para_sede(sede)
+    # incidente_id = incidentes registrados en la sede: si sube, el gateway reinicia sus HH.
+    return {**simulacion.BASE, **simulacion.de_sede(sede), "incidente_id": servicio.conteo_incidentes(s, sede)}
 
 
+@app.get("/api/auditoria", tags=["consola"])
+def get_auditoria(limite: int = Query(50, ge=1, le=500), _: dict = Depends(requiere("auditoria")),
+                  s: Session = Depends(obtener_sesion)):
+    return servicio.auditoria(s, limite)
+
+
+# --------------------------------------------------------------- WebSocket
 @app.websocket("/ws")
-async def ws(websocket: WebSocket):
-    await difusor.conectar(websocket)
+async def ws(websocket: WebSocket, token: str = ""):
+    await websocket.accept()
+    try:
+        rol = seguridad.decodificar(token, "usuario")["rol"]
+    except HTTPException:
+        # 4401: el dashboard vuelve a la pantalla de login.
+        await websocket.close(code=4401, reason="Token inválido o vencido")
+        return
+    difusor.clientes[websocket] = rol
     try:
         while True:
             await websocket.receive_text()  # el dashboard no envía nada; solo mantiene la conexión
