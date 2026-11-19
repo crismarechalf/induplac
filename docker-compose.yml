@@ -1,5 +1,9 @@
-# Induplac MVP: API + dashboard + PostgreSQL en un solo host (PC del equipo o EC2 de AWS Academy).
-# Los gateways corren en cada sede (en la demo: en el notebook) y apuntan a la IP de este host.
+# Induplac MVP en un solo host (EC2 de AWS Academy o PC del equipo).
+#
+#   docker compose up -d                       → db + api (local, sin HTTPS ni gateways)
+#   docker compose --profile gateways up -d    → + los 2 gateways simulados
+#   En la EC2, user-data.sh deja COMPOSE_PROFILES=gateways,https en .env:
+#   `docker compose up -d` levanta además los gateways y Caddy (HTTPS).
 services:
   db:
     image: postgres:16-alpine
@@ -27,8 +31,53 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql+psycopg://induplac:${DB_PASSWORD}@db:5432/induplac
+    # Plan B si Let's Encrypt falla: en la EC2 el security group mantiene cerrado el 8000;
+    # abrirlo da acceso directo por http://<sub>.duckdns.org:8000 (ver deploy/README.md).
     ports:
       - "8000:8000"
 
+  gateway-planta:
+    build: gateway
+    profiles: [gateways]
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      SEDE: planta
+      SECRETO: ${GATEWAY_PLANTA_SECRET:-}
+      CICLO_SEG: ${CICLO_SEG:-3}
+    volumes:
+      - cola_planta:/datos
+
+  gateway-rm:
+    build: gateway
+    profiles: [gateways]
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      SEDE: oficina_rm
+      SECRETO: ${GATEWAY_OFICINA_RM_SECRET:-}
+      CICLO_SEG: ${CICLO_SEG:-3}
+    volumes:
+      - cola_rm:/datos
+
+  caddy:
+    image: caddy:2-alpine
+    profiles: [https]
+    restart: unless-stopped
+    depends_on: [api]
+    environment:
+      DOMINIO: ${DOMINIO:-}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data      # certificado: sobrevive a cada parada del Learner Lab
+      - caddy_config:/config
+
 volumes:
   pgdata:
+  cola_planta:
+  cola_rm:
+  caddy_data:
+  caddy_config:

@@ -14,7 +14,7 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///./induplac.db")
 # JWT que firma los tokens entregados a los gateways. Obligatorio y sin valor por defecto:
 # con una clave conocida cualquiera podría firmar tokens y enviar lotes a nombre de una sede.
 JWT_SECRET = os.getenv("JWT_SECRET", "")
-if len(JWT_SECRET) < 32 or JWT_SECRET.startswith("cambiar"):  # "cambiar..." = valor de .env.example
+if len(JWT_SECRET) < 32 or JWT_SECRET.lower().startswith("cambiar"):  # CAMBIAR = marcador de .env.example
     raise RuntimeError("Falta JWT_SECRET, tiene menos de 32 caracteres o es el de ejemplo: defínelo en .env")
 JWT_MINUTOS = _int("JWT_MINUTOS", 60)
 
@@ -34,10 +34,27 @@ CICLOS_SIN_DATOS = 2
 ZONA = os.getenv("ZONA_HORARIA", "America/Santiago")
 
 # Alertas por correo (opcional). Sin SMTP_HOST, las alertas solo quedan en el log.
+# Puerto 587 = STARTTLS; 465 = SSL directo (por si la red bloquea el 587).
 SMTP_HOST = os.getenv("SMTP_HOST", "")
 SMTP_PORT = _int("SMTP_PORT", 587)
 SMTP_USER = os.getenv("SMTP_USER", "")
 SMTP_PASS = os.getenv("SMTP_PASS", "")
+# Varios correos separados por coma. Vacío = se avisa a SMTP_USER.
 ALERTA_DESTINO = os.getenv("ALERTA_DESTINO", "")
+# Como máximo 1 correo por (sede, variable) cada N minutos reales.
+ALERTA_ENFRIAMIENTO_MIN = _int("ALERTA_ENFRIAMIENTO_MIN", 10)
+# Dirección del dashboard que va en los correos.
+URL_PUBLICA = os.getenv("URL_PUBLICA", "")
+
+# Usuario y contraseña del panel "Demo" (POST /api/simulacion). Sin ambos, nadie puede usarlo.
+DEMO_USUARIO = os.getenv("DEMO_USUARIO", "")
+DEMO_CLAVE = os.getenv("DEMO_CLAVE", "")
+# Los marcadores CAMBIAR de .env.example cuentan como "sin configurar".
+if "CAMBIAR" in (DEMO_USUARIO, DEMO_CLAVE):
+    DEMO_USUARIO = DEMO_CLAVE = ""
+
+# Mediciones que se conservan, en días del reloj de las lecturas (simulado en la demo).
+# Nunca menos de 29: la regla de consumo necesita 4 semanas + 1 h de historial.
+RETENCION_DIAS = max(_int("RETENCION_DIAS", 60), 29)
 
 FRONTEND_DIR = os.getenv("FRONTEND_DIR", os.path.join(os.path.dirname(__file__), "..", "..", "frontend"))

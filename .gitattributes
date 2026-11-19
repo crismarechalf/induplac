@@ -1,0 +1,3 @@
+# Scripts de despliegue siempre con saltos de línea LF (bash falla con CRLF de Windows).
+*.sh text eol=lf
+Caddyfile text eol=lf

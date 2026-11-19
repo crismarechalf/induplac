@@ -1,0 +1,6 @@
+# HTTPS automático con Let's Encrypt para el dominio de DuckDNS (DOMINIO en .env).
+# reverse_proxy también maneja el WebSocket /ws sin configuración extra.
+{$DOMINIO} {
+	encode gzip
+	reverse_proxy api:8000
+}

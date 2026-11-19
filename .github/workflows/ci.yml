@@ -40,5 +40,11 @@ jobs:
         env:
           TEST_DATABASE_URL: postgresql+psycopg://induplac:ci@localhost:5432/induplac_test
         run: pytest -v
-      - name: Construir imagen Docker
-        run: docker build -f backend/Dockerfile -t induplac-api:${{ github.sha }} .
+      - name: Revisar scripts de despliegue (bash -n + shellcheck)
+        run: |
+          for s in deploy/*.sh; do bash -n "$s"; done
+          shellcheck deploy/*.sh
+      - name: Construir imágenes Docker (API y gateway)
+        run: |
+          docker build -f backend/Dockerfile -t induplac-api:${{ github.sha }} .
+          docker build -t induplac-gateway:${{ github.sha }} gateway
