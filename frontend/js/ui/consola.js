@@ -19,7 +19,7 @@ const CONTROLES = {
 
 const pct = (v, base) => (base === 0 && v > 0 ? `+${v}%` : `${v}%`);
 
-export function montarConsola({ boton, proveedor, valorActual, horaSimulada }) {
+export function montarConsola({ boton, proveedor, valorActual, horaSimulada, alMontar = () => {} }) {
   const panel = document.createElement('aside');
   panel.className = 'consola';
   panel.hidden = true;
@@ -38,9 +38,13 @@ export function montarConsola({ boton, proveedor, valorActual, horaSimulada }) {
     <div class="consola-controles" role="tabpanel"></div>
     <button class="btn-restablecer">Restablecer todo</button>
     <p class="consola-estado" role="status"></p>
-    <h3>Registro de acciones</h3>
+    <div class="cabecera-panel">
+      <h3>Registro de acciones</h3>
+      <button class="btn-chico exportar-auditoria" hidden>Exportar auditoría</button>
+    </div>
     <ol class="consola-registro"></ol>`;
   document.body.append(panel);
+  alMontar(panel); // ej. el botón "Exportar auditoría"
 
   const contenedor = panel.querySelector('.consola-controles');
   const textoEstado = panel.querySelector('.consola-estado');

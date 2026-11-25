@@ -61,6 +61,28 @@ export const getReloj = () => pedir('/api/reloj');
 export const getIncidentes = () => pedir('/api/incidentes', { params: { limite: 5 } });
 export const registrarIncidente = (datos) => pedir('/api/incidentes', { metodo: 'POST', cuerpo: datos });
 
+// ---------- Exportación CSV ----------
+// GET /api/exportar/{recurso}?desde=&hasta=&sede=&variable= → { blob, nombre }
+// Lleva el token en la cabecera, por eso no sirve un enlace directo: se baja como blob.
+export async function exportar(recurso, params) {
+  const url = new URL(`${API_BASE_URL}/api/exportar/${recurso}`, location.href);
+  for (const [clave, valor] of Object.entries(params)) {
+    if (valor !== undefined && valor !== null && valor !== '') url.searchParams.set(clave, valor);
+  }
+  const token = leerSesion()?.token;
+  const respuesta = await fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} });
+  if (respuesta.status === 401 && token) {
+    sesionExpirada();
+    throw new Error('Sesión vencida');
+  }
+  if (!respuesta.ok) {
+    const detalle = await respuesta.json().catch(() => ({}));
+    throw Object.assign(new Error(mensajeError(detalle, respuesta.status)), { status: respuesta.status });
+  }
+  const nombre = /filename="([^"]+)"/.exec(respuesta.headers.get('Content-Disposition') ?? '')?.[1] ?? `induplac_${recurso}.csv`;
+  return { blob: await respuesta.blob(), nombre };
+}
+
 // ---------- Consola de operación (solo admin) ----------
 export const consola = {
   obtener: () => pedir('/api/simulacion'),

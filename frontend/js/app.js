@@ -7,6 +7,7 @@ import { pintarAlertas } from './ui/alertas.js';
 import { montarGrafico } from './ui/grafico.js';
 import { montarConsola } from './ui/consola.js';
 import { montarFormularioIncidente, montarIncidentes } from './ui/incidentes.js';
+import { exportarCsv, montarExportador } from './ui/exportar.js';
 import { hora } from './ui/formato.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -78,12 +79,38 @@ async function iniciar() {
   if (tienePermiso('incidentes_registrar') && proveedor.registrarIncidente) {
     montarFormularioIncidente($('#btn-incidente'), proveedor);
   }
+  // Exportación CSV. Los botones siguen al rol solo en la interfaz: el servidor filtra y valida.
+  // Mediciones y alertas usan la hora simulada; incidentes y auditoría, la hora real.
+  const exporta = Boolean(proveedor.exportar);
+  const ahoraSimulada = () => horaSimulada() ?? new Date();
+  if (exporta) {
+    const boton = $('#exportar-historico');
+    boton.hidden = false;
+    boton.addEventListener('click', async () => {
+      const periodo = grafico.periodo();
+      $('#exportar-historico-error').textContent = periodo
+        ? (await exportarCsv(proveedor, 'mediciones', periodo)) ?? ''
+        : 'Aún no hay lecturas para exportar.';
+    });
+    montarExportador({ boton: $('#exportar-alertas'), proveedor, recurso: 'alertas', titulo: 'Exportar alertas',
+      sedes: Object.keys(usuario.vista), ahora: ahoraSimulada,
+      nota: 'Fechas en hora simulada (la misma de las lecturas). Incluye alertas abiertas y cerradas.' });
+  }
+  if (exporta && incidentes) {
+    montarExportador({ boton: $('#exportar-incidentes'), proveedor, recurso: 'incidentes', titulo: 'Exportar incidentes',
+      sedes: Object.keys(usuario.vista), ahora: () => new Date(), dias: 30 });
+  }
+
   const consola = tienePermiso('consola') && proveedor.consola
     ? montarConsola({
         boton: $('#btn-consola'),
         proveedor,
         valorActual: (sede, variable) => ultimos.get(`${sede}|${variable}`),
         horaSimulada,
+        alMontar: (panel) => exporta && tienePermiso('auditoria') && montarExportador({
+          boton: panel.querySelector('.exportar-auditoria'), proveedor, recurso: 'auditoria',
+          titulo: 'Exportar auditoría', ahora: () => new Date(),
+          nota: 'Logins, cambios de la consola, incidentes y exportaciones (hora real).' }),
       })
     : null;
 

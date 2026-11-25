@@ -70,7 +70,7 @@ También se puede cortar de verdad: apagar el Wi-Fi del notebook donde corre el 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest -v                     # 48 pruebas: reglas (incluye piso del agua y línea detenida), seguridad, validación,
+pytest -v                     # 54 pruebas (incluye exportación CSV): reglas (incluye piso del agua y línea detenida), seguridad, validación,
                               #   ingesta, alertas, sin datos, WebSocket, login y roles, consola, incidentes,
                               #   reloj único, auditoría, correos de aviso y retención
 ```
@@ -94,10 +94,30 @@ pytest -v                     # 48 pruebas: reglas (incluye piso del agua y lín
 | PUT | `/api/simulacion/{sede}` | Consola (admin): `{electricidad_pct, agua_pct, produccion_pct, uv_forzado, enlace_cortado}`, todos opcionales |
 | POST | `/api/simulacion/restablecer` | Consola (admin): todo en "Automático" |
 | GET | `/api/simulacion/{sede}` | Gateway (Bearer de esa sede): lo que aplica en su ciclo + `incidente_id` |
-| GET | `/api/auditoria?limite=` | Admin: logins, cambios de la consola e incidentes |
+| GET | `/api/auditoria?limite=` | Admin: logins, cambios de la consola, incidentes y exportaciones |
+| GET | `/api/exportar/{recurso}?desde=&hasta=&sede=&variable=` | CSV de `mediciones`, `alertas` (todos los roles, con su filtro), `incidentes` (admin, jefatura, prevencion) o `auditoria` (admin). Ver [Exportación CSV](#exportación-csv) |
 | WS | `/ws?token=` | Eventos `{tipo: "estado" \| "alerta" \| "incidente", data}` filtrados por rol. Sin token válido → cierre 4401 |
 
 Códigos: `401` sin token, token inválido o de otro tipo (usuario ↔ gateway) · `403` el rol no tiene permiso · `403` un gateway intenta enviar datos de otra sede · `422` lote inválido (variable que no existe en la sede, unidad incorrecta, valor fuera de rango, fecha sin zona horaria).
+
+## Exportación CSV
+
+`GET /api/exportar/{recurso}` entrega solo lo que el usuario ya puede ver en pantalla (mismo filtro por rol que la consulta). En el dashboard: **Descargar CSV** (histórico del gráfico), **Exportar alertas**, **Exportar incidentes** y, en la consola del admin, **Exportar auditoría**.
+
+- `desde` y `hasta`: obligatorios, ISO 8601 con zona horaria, período de 90 días como máximo. Mediciones y alertas usan la hora de las lecturas (simulada en la demo); incidentes y auditoría, la hora real.
+- `sede` (`oficina_rm` o `planta`) opcional; `variable` opcional, solo para mediciones y alertas.
+- Formato para Excel en Chile: UTF-8 con BOM, separador `;`, decimales con coma y fechas `YYYY-MM-DD HH:MM` en hora de Chile. Las celdas de texto que empiezan con `=`, `+`, `-`, `@`, tabulación o retorno de carro llevan un `'` al inicio (protección contra inyección CSV).
+- Respuestas: `401` sin token o con token de gateway · `403` recurso, sede o variable fuera del rol · `422` período faltante, invertido o mayor a 90 días, o variable que no existe en la sede.
+- Cada exportación queda en la auditoría (usuario, recurso, período, sede y cantidad de filas).
+
+Ejemplo con `curl` (token del login):
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login -H 'Content-Type: application/json'   -d '{"usuario":"jefatura","clave":"<USUARIOS_CLAVE>"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
+curl -G -OJ http://localhost:8000/api/exportar/mediciones -H "Authorization: Bearer $TOKEN"   --data-urlencode "desde=2026-11-18T00:00:00-03:00" --data-urlencode "hasta=2026-11-25T00:00:00-03:00"   -d sede=planta -d variable=electricidad
+```
+
+`-OJ` guarda el archivo con el nombre que indica la API (`induplac_mediciones_planta_2026-11-18_2026-11-25.csv`).
 
 ## Reglas
 
