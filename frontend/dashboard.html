@@ -30,10 +30,16 @@
     <div id="sedes" class="sedes"></div>
 
     <aside class="panel alertas" aria-labelledby="titulo-alertas">
-      <h2 id="titulo-alertas">Alertas activas <span id="total-alertas" class="contador">0</span></h2>
+      <div class="cabecera-panel">
+        <h2 id="titulo-alertas">Alertas activas <span id="total-alertas" class="contador">0</span></h2>
+        <button id="exportar-alertas" class="btn-chico" hidden>Exportar alertas</button>
+      </div>
       <ul id="lista-alertas" class="lista-alertas" aria-live="polite"></ul>
       <section id="incidentes" class="incidentes" aria-labelledby="titulo-incidentes" hidden>
-        <h2 id="titulo-incidentes">Incidentes recientes</h2>
+        <div class="cabecera-panel">
+          <h2 id="titulo-incidentes">Incidentes recientes</h2>
+          <button id="exportar-incidentes" class="btn-chico" hidden>Exportar incidentes</button>
+        </div>
         <ul id="lista-incidentes" class="lista-incidentes"></ul>
       </section>
     </aside>
@@ -43,6 +49,8 @@
         <h2 id="titulo-historico">Histórico últimas 24 h</h2>
         <label>Sede <select id="hist-sede"></select></label>
         <label>Variable <select id="hist-variable"></select></label>
+        <button id="exportar-historico" class="btn-chico" hidden>Descargar CSV</button>
+        <span id="exportar-historico-error" class="login-error" role="alert"></span>
       </div>
       <div class="lienzo"><canvas aria-label="Gráfico histórico de la variable seleccionada" role="img"></canvas></div>
     </section>

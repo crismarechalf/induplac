@@ -69,6 +69,12 @@ export function montarGrafico(seccion, perfil, proveedor) {
   selVariable.addEventListener('change', recargar);
 
   return {
+    // Lo que se está mostrando, para "Descargar CSV": sede, variable y últimas 24 h.
+    periodo() {
+      if (!ultimoTs) return null;
+      return { sede: selSede.value, variable: selVariable.value,
+        desde: new Date(Date.parse(ultimoTs) - DIA_MS).toISOString(), hasta: ultimoTs };
+    },
     // Recibe ítems de estado; recarga solo si incluyen la serie seleccionada.
     actualizar(items) {
       for (const it of items) if (!ultimoTs || Date.parse(it.ts) > Date.parse(ultimoTs)) ultimoTs = it.ts;

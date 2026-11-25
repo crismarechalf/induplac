@@ -178,6 +178,12 @@ textarea { resize: vertical; }
 .hora-simulada { font-size: .8rem; color: var(--texto-2); border: 1px solid var(--borde); border-radius: 999px; padding: .15rem .7rem; }
 .hora-simulada strong { color: var(--cian); font-variant-numeric: tabular-nums; }
 
+/* ---------- Exportación CSV ---------- */
+.cabecera-panel { display: flex; justify-content: space-between; align-items: center; gap: .5rem; flex-wrap: wrap; }
+.btn-chico { padding: .2rem .6rem; background: transparent; border: 1px solid var(--borde); border-radius: 6px; font-size: .8rem; color: var(--texto-2); }
+.btn-chico:hover { border-color: var(--cian); color: var(--texto); }
+.btn-chico[hidden] { display: none; }
+
 /* ---------- Incidentes ---------- */
 .incidentes { display: grid; gap: .6rem; padding-top: .75rem; border-top: 1px solid var(--borde); }
 .incidentes[hidden] { display: none; }

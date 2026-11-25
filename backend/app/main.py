@@ -16,6 +16,7 @@ Endpoints:
   POST /api/simulacion/restablecer  consola → todo en "Automático"          [admin]
   GET  /api/simulacion/{sede}  gateway ← lo que debe aplicar en su ciclo     [Bearer gateway de esa sede]
   GET  /api/auditoria          admin ← quién hizo qué y cuándo               [admin]
+  GET  /api/exportar/{recurso} dashboard ← CSV de mediciones, alertas, incidentes o auditoría (según rol)
   GET  /api/salud              monitoreo ← API, base y última llegada por sede (público, sin datos de negocio)
   WS   /ws?token=            dashboard ← eventos estado | alerta | incidente (según rol; sin token → 4401)
 Documentación interactiva (Swagger): /docs
@@ -29,12 +30,13 @@ from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from . import config, notificador, roles, seguridad, servicio, simulacion
+from . import config, exportar, notificador, roles, seguridad, servicio, simulacion
 from .catalogo import NOMBRE_SEDE, NOMBRE_VARIABLE, PUNTOS
 from .db import Incidente, SesionLocal, Usuario, crear_tablas, obtener_sesion
 from .schemas import LoteEntrada, ResultadoIngesta, TokenEntrada, TokenSalida
@@ -386,6 +388,72 @@ def get_simulacion_sede(sede: str, gw: dict = Depends(gateway_actual), s: Sessio
 def get_auditoria(limite: int = Query(50, ge=1, le=500), _: dict = Depends(requiere("auditoria")),
                   s: Session = Depends(obtener_sesion)):
     return servicio.auditoria(s, limite)
+
+
+# --------------------------------------------------------------- exportación CSV
+_ERRORES_EXPORTAR = {
+    401: {"description": "Sin token o con token de gateway (solo se aceptan tokens de usuario)"},
+    403: {"description": "El rol no tiene acceso al recurso, o pidió una sede o variable fuera de su permiso"},
+    422: {"description": "Falta el período, desde > hasta, período de más de 90 días o variable que no existe en la sede"},
+}
+
+
+@app.get("/api/exportar/{recurso}", tags=["exportación"], response_class=StreamingResponse,
+         summary="Exportar a CSV lo que el usuario puede ver",
+         responses={200: {"content": {"text/csv": {}},
+                          "description": "CSV para Excel (UTF-8 con BOM, separador ;, decimales con coma, hora de Chile)"},
+                    **_ERRORES_EXPORTAR})
+def get_exportar(
+    recurso: Literal[exportar.RECURSOS],
+    desde: datetime | None = Query(None, description="Inicio del período, ISO 8601 con zona (ej. 2026-11-18T00:00:00-03:00)"),
+    hasta: datetime | None = Query(None, description="Fin del período, ISO 8601 con zona. Máximo 90 días después de desde"),
+    sede: str | None = Query(None, description="oficina_rm o planta (opcional; no aplica a auditoría)"),
+    variable: str | None = Query(None, description="Solo para mediciones y alertas (opcional)"),
+    u: dict = Depends(usuario_actual),
+    s: Session = Depends(obtener_sesion),
+):
+    def rechazar(codigo: int, mensaje: str):
+        raise HTTPException(codigo, mensaje)
+
+    rol, vista = u["rol"], roles.vista(u["rol"])
+    permiso = exportar.PERMISO[recurso]
+    if permiso and not roles.tiene_permiso(rol, permiso):
+        rechazar(403, f"Tu perfil no puede exportar {recurso}.")
+    if desde is None or hasta is None:
+        rechazar(422, "Indica el período a exportar (desde y hasta).")
+    if desde.tzinfo is None or hasta.tzinfo is None:
+        rechazar(422, "Las fechas deben incluir la zona horaria.")
+    desde = desde.astimezone(timezone.utc).replace(tzinfo=None)
+    hasta = hasta.astimezone(timezone.utc).replace(tzinfo=None)
+    if desde > hasta:
+        rechazar(422, "La fecha de inicio es posterior a la de término.")
+    if hasta - desde > timedelta(days=90):
+        rechazar(422, "El período no puede superar los 90 días.")
+    if sede and sede not in PUNTOS:
+        rechazar(422, f"La sede {sede} no existe.")
+    if sede and recurso not in exportar.CON_SEDE:
+        rechazar(422, "La auditoría no se filtra por sede.")
+    if variable and recurso not in exportar.CON_VARIABLE:
+        rechazar(422, "El filtro por variable solo aplica a mediciones y alertas.")
+    if recurso in exportar.CON_VARIABLE:
+        if sede and sede not in vista:
+            rechazar(403, f"Tu perfil no puede ver datos de {NOMBRE_SEDE[sede]}.")
+        if variable:
+            sedes = [sede] if sede else list(PUNTOS)
+            if not any(variable in PUNTOS[x] for x in sedes):
+                rechazar(422, f"{' ni '.join(NOMBRE_SEDE[x] for x in sedes)} no mide {variable}.")
+            if not any(variable in vista.get(x, ()) for x in sedes):
+                rechazar(403, f"Tu perfil no puede ver {NOMBRE_VARIABLE[variable]}.")
+
+    q = exportar.consulta(recurso, vista, desde, hasta, sede, variable)
+    filas = exportar.contar(s, q)
+    servicio.auditar(s, u["sub"], "exportacion", {
+        "recurso": recurso, "desde": servicio.iso(desde), "hasta": servicio.iso(hasta),
+        "sede": sede or "todas", "variable": variable, "filas": filas})
+    nombre = (f"induplac_{recurso}_{sede or 'todas'}_"
+              f"{servicio._local(desde):%Y-%m-%d}_{servicio._local(hasta):%Y-%m-%d}.csv")
+    return StreamingResponse(exportar.generar_csv(SesionLocal, recurso, q), media_type="text/csv; charset=utf-8",
+                             headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
 
 
 # --------------------------------------------------------------- WebSocket
