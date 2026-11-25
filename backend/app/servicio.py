@@ -257,18 +257,18 @@ def _config(s: Session, clave: str) -> str | None:
 
 
 def iniciar_reloj(s: Session) -> None:
-    """La primera vez guarda el instante real y la hora simulada de inicio.
+    """En cada arranque de la API ancla el reloj: hora simulada = justo después del último lote.
 
-    La hora simulada arranca después del lote más nuevo que ya exista, para que un
-    despliegue con datos previos (reloj de los gateways ya adelantado) siga sin saltos atrás.
+    Así el tiempo con la instancia detenida (Learner Lab apagado) no hace avanzar la
+    simulación: si avanzara (×300 en la demo), al volver no habría lecturas de las 4 semanas
+    previas y la regla de consumo no tendría referencia. Tampoco hay saltos atrás.
+    Sin lecturas todavía, arranca en la hora real.
     """
-    if _config(s, "reloj_inicio_real"):
-        return
     ahora = ahora_utc()
     ultimo = s.scalar(select(func.max(Lote.ts)))
     inicio_sim = max(piso_15min(ahora), ultimo + PASO) if ultimo else piso_15min(ahora)
-    s.add_all([Config(clave="reloj_inicio_real", valor=ahora.isoformat()),
-               Config(clave="reloj_inicio_sim", valor=inicio_sim.isoformat())])
+    for clave, valor in (("reloj_inicio_real", ahora), ("reloj_inicio_sim", inicio_sim)):
+        s.merge(Config(clave=clave, valor=valor.isoformat()))
     s.commit()
 
 

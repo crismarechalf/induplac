@@ -97,3 +97,10 @@ def test_reloj_arranca_despues_del_ultimo_lote_existente(cliente):
         s.commit()
         servicio.iniciar_reloj(s)
         assert servicio.hora_simulada(s) >= (T0 + timedelta(days=400, minutes=15)).replace(tzinfo=None)
+        # Instancia detenida 2 días: al volver a arrancar, el reloj sigue desde el último lote
+        # (si contara el tiempo detenido, ×300 serían ~1,6 años sin historial).
+        s.merge(Config(clave="reloj_inicio_real", valor=(servicio.ahora_utc() - timedelta(days=2)).isoformat()))
+        s.commit()
+        servicio.iniciar_reloj(s)
+        reanudado = servicio.hora_simulada(s) - (T0 + timedelta(days=400)).replace(tzinfo=None)
+        assert timedelta(minutes=15) <= reanudado < timedelta(hours=1)
