@@ -15,7 +15,7 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 import pytest  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from app import notificador, seguridad, simulacion  # noqa: E402
+from app import carga, notificador, seguridad, simulacion  # noqa: E402
 from app.db import Base, engine  # noqa: E402
 from app.main import app  # noqa: E402
 
@@ -29,6 +29,7 @@ def cliente():
     simulacion.restablecer()
     notificador.reiniciar()
     seguridad.reiniciar_bloqueos()
+    carga.reiniciar()
     with TestClient(app) as c:  # al arrancar crea los 5 usuarios iniciales
         yield c
 

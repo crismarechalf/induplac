@@ -166,8 +166,14 @@ def ingerir(s: Session, lotes: list[LoteEntrada], gateway_id: str):
 
 
 # --------------------------------------------------------------- sin datos
+ORIGEN_MANUAL = "manual:"  # prefijo de Lote.gateway en las cargas manuales (contingencia)
+
+
 def ultimo_recibido(s: Session) -> dict[str, datetime]:
-    filas = s.execute(select(Lote.sede, func.max(Lote.recibido)).group_by(Lote.sede)).all()
+    """Última llegada de un lote del gateway de cada sede (las cargas manuales no cuentan:
+    subir una planilla no significa que el gateway volvió)."""
+    filas = s.execute(select(Lote.sede, func.max(Lote.recibido))
+                      .where(~Lote.gateway.startswith(ORIGEN_MANUAL)).group_by(Lote.sede)).all()
     return {sede: r for sede, r in filas}
 
 
@@ -313,3 +319,53 @@ def auditoria(s: Session, limite: int, acciones: tuple[str, ...] | None = None) 
     if acciones:
         q = q.where(Auditoria.accion.in_(acciones))
     return [{"ts": iso(a.ts), "usuario": a.usuario, "accion": a.accion, "detalle": a.detalle} for a in s.scalars(q)]
+
+
+# ---------------------------------------------------------------- carga manual (contingencia)
+def existentes(s: Session, sede: str, ts: datetime) -> set[str]:
+    """Variables que ya tienen lectura guardada para esa sede y hora."""
+    return set(s.scalars(select(Medicion.variable).where(Medicion.sede == sede, Medicion.ts == ts)))
+
+
+def ingerir_manual(s: Session, filas: list[dict], usuario: str):
+    """Guarda lecturas anotadas a mano: un lote por sede y ciclo, como el gateway.
+
+    `filas`: [{sede, variable, valor, unidad, ts}] ya validadas. Las que ya existen se descartan.
+    Completan el historial (la regla de consumo las usa como referencia), pero solo tocan
+    estado_actual y las alertas si son más recientes que la última lectura de ese punto:
+    una contingencia ya pasada no abre alertas. Nunca envían correos.
+    Devuelve (guardadas, duplicadas, eventos_websocket).
+    """
+    recibido = ahora_utc()
+    origen = f"{ORIGEN_MANUAL}{usuario}"[:40]
+    guardadas = duplicadas = 0
+    eventos: list[dict] = []
+    grupos: dict[tuple[str, datetime], list[dict]] = {}
+    for f in filas:
+        grupos.setdefault((f["sede"], f["ts"]), []).append(f)
+
+    for (sede, ts), grupo in sorted(grupos.items(), key=lambda g: g[0][1]):
+        ya = existentes(s, sede, ts)
+        nuevas = [f for f in grupo if f["variable"] not in ya]
+        duplicadas += len(grupo) - len(nuevas)
+        if not nuevas:
+            continue
+        lote = Lote(sede=sede, ts=ts, recibido=recibido, gateway=origen)
+        s.add(lote)
+        s.flush()
+        for f in nuevas:
+            s.add(Medicion(lote_id=lote.id, sede=sede, variable=f["variable"], valor=f["valor"],
+                           unidad=f["unidad"], ts=ts))
+        s.flush()
+        for f in nuevas:
+            actual = s.get(EstadoActual, (sede, f["variable"]))
+            if actual is not None and ts <= actual.ts:
+                continue  # lectura atrasada: solo historial
+            estado, mensaje, extras = _evaluar(s, sede, f["variable"], f["valor"], f["unidad"], ts)
+            fila = actual or EstadoActual(sede=sede, variable=f["variable"])
+            fila.valor, fila.unidad, fila.estado, fila.ts, fila.extras = f["valor"], f["unidad"], estado, ts, extras
+            s.add(fila)
+            _actualizar_alerta(s, sede, f["variable"], estado, mensaje, ts, eventos, [])
+        guardadas += len(nuevas)
+    s.commit()
+    return guardadas, duplicadas, eventos

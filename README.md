@@ -70,7 +70,7 @@ También se puede cortar de verdad: apagar el Wi-Fi del notebook donde corre el 
 ```bash
 cd backend
 pip install -r requirements-dev.txt
-pytest -v                     # 54 pruebas (incluye exportación CSV): reglas (incluye piso del agua y línea detenida), seguridad, validación,
+pytest -v                     # 64 pruebas (incluye exportación CSV y carga manual): reglas (incluye piso del agua y línea detenida), seguridad, validación,
                               #   ingesta, alertas, sin datos, WebSocket, login y roles, consola, incidentes,
                               #   reloj único, auditoría, correos de aviso y retención
 ```
@@ -95,6 +95,9 @@ pytest -v                     # 54 pruebas (incluye exportación CSV): reglas (i
 | POST | `/api/simulacion/restablecer` | Consola (admin): todo en "Automático" |
 | GET | `/api/simulacion/{sede}` | Gateway (Bearer de esa sede): lo que aplica en su ciclo + `incidente_id` |
 | GET | `/api/auditoria?limite=` | Admin: logins, cambios de la consola, incidentes y exportaciones |
+| GET | `/api/carga-manual/plantilla?sede=` | Plantilla CSV de la sede (admin, jefatura, prevencion). Ver [Carga manual](#carga-manual-por-contingencia) |
+| POST | `/api/carga-manual/validar` | Multipart, campo `archivo`: revisa el CSV sin guardar y devuelve el resumen y un `id_carga` (15 min) |
+| POST | `/api/carga-manual/confirmar` | `{id_carga}`: guarda las filas válidas y no duplicadas → `{guardadas, descartadas}` |
 | GET | `/api/exportar/{recurso}?desde=&hasta=&sede=&variable=` | CSV de `mediciones`, `alertas` (todos los roles, con su filtro), `incidentes` (admin, jefatura, prevencion) o `auditoria` (admin). Ver [Exportación CSV](#exportación-csv) |
 | WS | `/ws?token=` | Eventos `{tipo: "estado" \| "alerta" \| "incidente", data}` filtrados por rol. Sin token válido → cierre 4401 |
 
@@ -118,6 +121,28 @@ curl -G -OJ http://localhost:8000/api/exportar/mediciones -H "Authorization: Bea
 ```
 
 `-OJ` guarda el archivo con el nombre que indica la API (`induplac_mediciones_planta_2026-11-18_2026-11-25.csv`).
+
+## Carga manual por contingencia
+
+Para cuando una sede no puede enviar datos automáticamente (gateway o medidor caído, corte largo de Internet). Si la plataforma completa está caída, la plantilla se llena sin conexión y se sube cuando vuelve.
+
+1. **Anotar** las lecturas a mano durante la contingencia (cada 15 minutos: 00, 15, 30 y 45).
+2. **Descargar la plantilla**: botón **Carga manual** del header → elegir la sede → **Descargar plantilla**.
+3. **Llenarla**: una fila por variable y hora, `fecha_hora;sede;variable;valor;unidad`, con la hora de Chile (`AAAA-MM-DD HH:MM`) y decimales con coma. Las líneas que empiezan con `#` (instrucciones y ejemplos) se ignoran. Es el mismo formato de la exportación de mediciones: un CSV exportado se puede volver a cargar.
+4. **Validar**: **Subir archivo**. Muestra cuántas filas son válidas, cuáles tienen error (fila y motivo) y cuántas ya existían. No guarda nada.
+5. **Confirmar**: **Confirmar carga** (antes de 15 minutos). Guarda solo las filas válidas y no duplicadas.
+
+Reglas: las mismas validaciones del gateway (variable de la sede, unidad, rango físico), minutos del ciclo, ni en el futuro ni con más de 90 días según el reloj de la plataforma, archivo de máximo 1 MB y 5.000 filas. Admin y jefatura cargan todo; prevención solo HH sin incidentes. Las lecturas atrasadas completan el historial (la regla del +20% las usa como referencia) pero no cambian el estado actual, no abren alertas y no envían correos. Cada validación y confirmación queda en la auditoría.
+
+Ejemplo con `curl`:
+
+```bash
+TOKEN=$(curl -s -X POST http://localhost:8000/api/auth/login -H 'Content-Type: application/json'   -d '{"usuario":"jefatura","clave":"<USUARIOS_CLAVE>"}' | python3 -c 'import json,sys;print(json.load(sys.stdin)["access_token"])')
+curl -OJ "http://localhost:8000/api/carga-manual/plantilla?sede=planta" -H "Authorization: Bearer $TOKEN"
+# … llenar el CSV …
+ID=$(curl -s http://localhost:8000/api/carga-manual/validar -H "Authorization: Bearer $TOKEN"   -F "archivo=@induplac_plantilla_carga_planta.csv" | python3 -c 'import json,sys;r=json.load(sys.stdin);print(r);print(r["id_carga"])' | tail -n 1)
+curl -s http://localhost:8000/api/carga-manual/confirmar -H "Authorization: Bearer $TOKEN"   -H 'Content-Type: application/json' -d "{\"id_carga\":\"$ID\"}"
+```
 
 ## Reglas
 

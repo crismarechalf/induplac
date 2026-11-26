@@ -17,6 +17,9 @@ Endpoints:
   GET  /api/simulacion/{sede}  gateway ← lo que debe aplicar en su ciclo     [Bearer gateway de esa sede]
   GET  /api/auditoria          admin ← quién hizo qué y cuándo               [admin]
   GET  /api/exportar/{recurso} dashboard ← CSV de mediciones, alertas, incidentes o auditoría (según rol)
+  GET  /api/carga-manual/plantilla   contingencia ← plantilla CSV de una sede      [admin, jefatura, prevencion]
+  POST /api/carga-manual/validar     contingencia → revisa el CSV sin guardar      [admin, jefatura, prevencion]
+  POST /api/carga-manual/confirmar   contingencia → guarda lo validado             [admin, jefatura, prevencion]
   GET  /api/salud              monitoreo ← API, base y última llegada por sede (público, sin datos de negocio)
   WS   /ws?token=            dashboard ← eventos estado | alerta | incidente (según rol; sin token → 4401)
 Documentación interactiva (Swagger): /docs
@@ -28,7 +31,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Literal
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect, status
+from fastapi import (Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile, WebSocket,
+                     WebSocketDisconnect, status)
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -36,7 +40,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select, text
 from sqlalchemy.orm import Session
 
-from . import config, exportar, notificador, roles, seguridad, servicio, simulacion
+from . import carga, config, exportar, notificador, roles, seguridad, servicio, simulacion
 from .catalogo import NOMBRE_SEDE, NOMBRE_VARIABLE, PUNTOS
 from .db import Incidente, SesionLocal, Usuario, crear_tablas, obtener_sesion
 from .schemas import LoteEntrada, ResultadoIngesta, TokenEntrada, TokenSalida
@@ -454,6 +458,104 @@ def get_exportar(
               f"{servicio._local(desde):%Y-%m-%d}_{servicio._local(hasta):%Y-%m-%d}.csv")
     return StreamingResponse(exportar.generar_csv(SesionLocal, recurso, q), media_type="text/csv; charset=utf-8",
                              headers={"Content-Disposition": f'attachment; filename="{nombre}"'})
+
+
+# --------------------------------------------------------------- carga manual (contingencia)
+class ErrorFila(BaseModel):
+    fila: int = Field(description="Número de línea en el archivo")
+    motivo: str
+
+
+class ResumenCarga(BaseModel):
+    id_carga: str = Field(description="Para confirmar; vence en 15 minutos")
+    vence_en_seg: int
+    archivo: str
+    filas_validas: int = Field(description="Se guardarán al confirmar")
+    filas_duplicadas: int = Field(description="Ya existen para esa sede, variable y hora")
+    filas_con_error: int
+    errores: list[ErrorFila] = Field(description="Hasta 200 filas con su motivo")
+    duplicadas: list[int] = Field(description="Números de línea de las filas duplicadas (hasta 200)")
+    desde: str | None = Field(description="Primera fecha del archivo, hora de Chile")
+    hasta: str | None
+    sedes: list[str]
+
+
+class ConfirmarCarga(BaseModel):
+    id_carga: str
+
+
+class ResultadoCarga(BaseModel):
+    guardadas: int
+    descartadas: int = Field(description="Filas con error o duplicadas")
+
+
+_ERRORES_CARGA = {
+    401: {"description": "Sin token o con token de gateway"},
+    403: {"description": "El rol no puede hacer cargas manuales (o la carga la validó otro usuario)"},
+}
+
+
+@app.get("/api/carga-manual/plantilla", tags=["carga manual"], response_class=Response,
+         summary="Plantilla CSV para anotar lecturas a mano",
+         responses={200: {"content": {"text/csv": {}}, "description": "Encabezado + filas de ejemplo con # (se ignoran)"},
+                    **_ERRORES_CARGA, 422: {"description": "Sede inexistente"}})
+def get_plantilla(sede: str = Query(..., description="oficina_rm o planta"),
+                  u: dict = Depends(requiere("carga_manual")), s: Session = Depends(obtener_sesion)):
+    if sede not in PUNTOS:
+        raise HTTPException(422, f"La sede {sede} no existe (usa oficina_rm o planta).")
+    contenido = carga.plantilla(sede, u["rol"], servicio.hora_simulada(s))
+    return Response(contenido, media_type="text/csv; charset=utf-8",
+                    headers={"Content-Disposition": f'attachment; filename="induplac_plantilla_carga_{sede}.csv"'})
+
+
+@app.post("/api/carga-manual/validar", tags=["carga manual"], response_model=ResumenCarga,
+          summary="Revisar un CSV de carga manual (no guarda nada)",
+          responses={**_ERRORES_CARGA, 413: {"description": "Archivo de más de 1 MB"},
+                     422: {"description": "Encabezado incorrecto, archivo vacío o más de 5.000 filas"}})
+async def post_validar(archivo: UploadFile = File(..., description="CSV con el formato de la plantilla"),
+                       u: dict = Depends(requiere("carga_manual"))):
+    contenido = await archivo.read(carga.MAX_BYTES + 1)
+
+    def revisar():
+        with SesionLocal() as s:
+            r = carga.validar(s, contenido, u["rol"])
+            servicio.auditar(s, u["sub"], "carga_validacion", {"archivo": archivo.filename, **{
+                k: r["resumen"][k] for k in ("sedes", "desde", "hasta", "filas_validas", "filas_duplicadas",
+                                              "filas_con_error")}})
+            return r
+    try:
+        r = await run_in_threadpool(revisar)
+    except carga.ArchivoInvalido as e:
+        raise HTTPException(e.status, str(e))
+    id_carga = carga.guardar_pendiente(u["sub"], archivo.filename or "archivo.csv", r["filas"], r["resumen"])
+    return {"id_carga": id_carga, "vence_en_seg": carga.VIGENCIA_SEG, "archivo": archivo.filename or "", **r["resumen"]}
+
+
+@app.post("/api/carga-manual/confirmar", tags=["carga manual"], response_model=ResultadoCarga,
+          summary="Guardar las filas válidas y no duplicadas de una carga validada",
+          responses={**_ERRORES_CARGA, 404: {"description": "id_carga inexistente o vencido"}})
+async def post_confirmar(datos: ConfirmarCarga, u: dict = Depends(requiere("carga_manual"))):
+    try:
+        pendiente = carga.tomar_pendiente(datos.id_carga, u["sub"])
+    except carga.ArchivoInvalido as e:
+        raise HTTPException(e.status, str(e))
+    resumen = pendiente["resumen"]
+
+    def guardar():
+        with SesionLocal() as s:
+            guardadas, duplicadas, eventos = servicio.ingerir_manual(s, pendiente["filas"], u["sub"])
+            descartadas = resumen["filas_con_error"] + resumen["filas_duplicadas"] + duplicadas
+            servicio.auditar(s, u["sub"], "carga_confirmacion", {
+                "archivo": pendiente["archivo"], "sedes": resumen["sedes"], "desde": resumen["desde"],
+                "hasta": resumen["hasta"], "guardadas": guardadas, "descartadas": descartadas})
+            return guardadas, descartadas, eventos, servicio.estado_actual(s)
+
+    guardadas, descartadas, eventos, estado = await run_in_threadpool(guardar)
+    for evento in eventos:  # alertas solo de lecturas más nuevas que las guardadas; sin correos
+        await difusor.enviar(evento)
+    await difusor.enviar({"tipo": "estado", "data": estado})  # el dashboard se refresca
+    log.info("Carga manual de %s: %d guardadas, %d descartadas", u["sub"], guardadas, descartadas)
+    return {"guardadas": guardadas, "descartadas": descartadas}
 
 
 # --------------------------------------------------------------- WebSocket
