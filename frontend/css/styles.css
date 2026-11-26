@@ -184,6 +184,20 @@ textarea { resize: vertical; }
 .btn-chico:hover { border-color: var(--cian); color: var(--texto); }
 .btn-chico[hidden] { display: none; }
 
+/* ---------- Carga manual ---------- */
+.dialogo-ancho { width: min(46rem, calc(100vw - 32px)); }
+.formulario-incidente h3 { font-size: .9rem; margin-top: .25rem; color: var(--texto-2); text-transform: uppercase; letter-spacing: .06em; }
+.fila-carga { display: flex; flex-wrap: wrap; align-items: end; gap: .75rem; }
+.fila-carga label { display: grid; gap: .3rem; font-size: .9rem; color: var(--texto-2); }
+.subir input[type="file"] { padding: .35rem; }
+.carga-cifras { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: .5rem 1.25rem; }
+.carga-cifras strong { font-size: 1.15rem; font-variant-numeric: tabular-nums; }
+.carga-errores { width: 100%; border-collapse: collapse; font-size: .82rem; margin-top: .5rem; display: block; max-height: 14rem; overflow-y: auto; }
+.carga-errores th, .carga-errores td { text-align: left; padding: .3rem .5rem; border-bottom: 1px solid var(--borde); vertical-align: top; }
+.carga-errores th { color: var(--texto-2); position: sticky; top: 0; background: var(--navy-oscuro); }
+.carga-errores td:first-child { font-variant-numeric: tabular-nums; color: var(--texto-2); }
+.carga-resultado { margin-top: .5rem; padding: .5rem .7rem; border-left: 3px solid var(--verde); background: rgba(46, 158, 91, .12); border-radius: 4px; }
+
 /* ---------- Incidentes ---------- */
 .incidentes { display: grid; gap: .6rem; padding-top: .75rem; border-top: 1px solid var(--borde); }
 .incidentes[hidden] { display: none; }

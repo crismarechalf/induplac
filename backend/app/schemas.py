@@ -35,20 +35,31 @@ class LoteEntrada(BaseModel):
 
     @model_validator(mode="after")
     def mediciones_validas(self):
-        puntos = PUNTOS[self.sede]
         vistas = set()
         for m in self.mediciones:
-            if m.variable not in puntos:
-                raise ValueError(f"{m.variable} no se mide en {self.sede}")
             if m.variable in vistas:
                 raise ValueError(f"{m.variable} viene repetida en el lote")
             vistas.add(m.variable)
-            if m.unidad != puntos[m.variable]:
-                raise ValueError(f"{m.variable}: unidad {m.unidad!r}, se esperaba {puntos[m.variable]!r}")
-            minimo, maximo = RANGO_VALIDO[m.variable]
-            if not math.isfinite(m.valor) or not (minimo <= m.valor <= maximo):
-                raise ValueError(f"{m.variable}: valor {m.valor} fuera de rango [{minimo}, {maximo}]")
+            error = error_medicion(self.sede, m.variable, m.unidad, m.valor)
+            if error:
+                raise ValueError(error)
         return self
+
+
+def error_medicion(sede: str, variable: str, unidad: str, valor: float) -> str | None:
+    """Reglas de una medición según el catálogo (las usan los lotes del gateway y la carga manual).
+
+    Devuelve el motivo en palabras, o None si es válida.
+    """
+    puntos = PUNTOS[sede]
+    if variable not in puntos:
+        return f"{variable} no se mide en {sede}"
+    if unidad != puntos[variable]:
+        return f"{variable}: unidad {unidad!r}, se esperaba {puntos[variable]!r}"
+    minimo, maximo = RANGO_VALIDO[variable]
+    if not math.isfinite(valor) or not (minimo <= valor <= maximo):
+        return f"{variable}: valor {valor:g} fuera de rango [{minimo}, {maximo}]"
+    return None
 
 
 class ResultadoIngesta(BaseModel):

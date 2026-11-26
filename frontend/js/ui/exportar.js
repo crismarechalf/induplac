@@ -11,7 +11,7 @@ function aInput(fecha) {
   return d.toISOString().slice(0, 16);
 }
 
-function descargar({ blob, nombre }) {
+export function descargar({ blob, nombre }) {
   const url = URL.createObjectURL(blob);
   const enlace = Object.assign(document.createElement('a'), { href: url, download: nombre });
   document.body.append(enlace);

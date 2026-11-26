@@ -5,7 +5,7 @@ import { API_BASE_URL, WS_URL } from '../config.js';
 import { leerSesion, sesionExpirada } from '../sesion.js';
 
 // Petición con el token Bearer. 401 → la sesión venció: de vuelta al login.
-async function pedir(ruta, { metodo = 'GET', params = {}, cuerpo } = {}) {
+async function pedir(ruta, { metodo = 'GET', params = {}, cuerpo, formulario } = {}) {
   const url = new URL(API_BASE_URL + ruta, location.href);
   for (const [clave, valor] of Object.entries(params)) {
     if (valor !== undefined && valor !== null && valor !== '') url.searchParams.set(clave, valor);
@@ -14,7 +14,9 @@ async function pedir(ruta, { metodo = 'GET', params = {}, cuerpo } = {}) {
   const token = leerSesion()?.token;
   if (token) headers.Authorization = `Bearer ${token}`;
   if (cuerpo !== undefined) headers['Content-Type'] = 'application/json';
-  const respuesta = await fetch(url, { method: metodo, headers, body: cuerpo === undefined ? undefined : JSON.stringify(cuerpo) });
+  // Con FormData (archivos) el navegador pone el Content-Type multipart con su boundary.
+  const body = formulario ?? (cuerpo === undefined ? undefined : JSON.stringify(cuerpo));
+  const respuesta = await fetch(url, { method: metodo, headers, body });
   if (respuesta.status === 401 && token) {
     sesionExpirada();
     throw new Error('Sesión vencida');
@@ -61,11 +63,11 @@ export const getReloj = () => pedir('/api/reloj');
 export const getIncidentes = () => pedir('/api/incidentes', { params: { limite: 5 } });
 export const registrarIncidente = (datos) => pedir('/api/incidentes', { metodo: 'POST', cuerpo: datos });
 
-// ---------- Exportación CSV ----------
-// GET /api/exportar/{recurso}?desde=&hasta=&sede=&variable= → { blob, nombre }
-// Lleva el token en la cabecera, por eso no sirve un enlace directo: se baja como blob.
-export async function exportar(recurso, params) {
-  const url = new URL(`${API_BASE_URL}/api/exportar/${recurso}`, location.href);
+// ---------- Archivos (exportación CSV y plantilla de carga) ----------
+// Llevan el token en la cabecera, por eso no sirve un enlace directo: se bajan como blob
+// con el nombre que indica Content-Disposition.
+async function bajar(ruta, params, nombrePorDefecto) {
+  const url = new URL(API_BASE_URL + ruta, location.href);
   for (const [clave, valor] of Object.entries(params)) {
     if (valor !== undefined && valor !== null && valor !== '') url.searchParams.set(clave, valor);
   }
@@ -79,9 +81,28 @@ export async function exportar(recurso, params) {
     const detalle = await respuesta.json().catch(() => ({}));
     throw Object.assign(new Error(mensajeError(detalle, respuesta.status)), { status: respuesta.status });
   }
-  const nombre = /filename="([^"]+)"/.exec(respuesta.headers.get('Content-Disposition') ?? '')?.[1] ?? `induplac_${recurso}.csv`;
+  const nombre = /filename="([^"]+)"/.exec(respuesta.headers.get('Content-Disposition') ?? '')?.[1] ?? nombrePorDefecto;
   return { blob: await respuesta.blob(), nombre };
 }
+
+// GET /api/exportar/{recurso}?desde=&hasta=&sede=&variable= → { blob, nombre }
+export const exportar = (recurso, params) => bajar(`/api/exportar/${recurso}`, params, `induplac_${recurso}.csv`);
+
+// ---------- Carga manual por contingencia ----------
+// GET /api/carga-manual/plantilla?sede= → { blob, nombre }
+export const plantillaCarga = (sede) =>
+  bajar('/api/carga-manual/plantilla', { sede }, `induplac_plantilla_carga_${sede}.csv`);
+
+// POST /api/carga-manual/validar (multipart, campo "archivo") → resumen con id_carga. No guarda nada.
+export function validarCarga(archivo) {
+  const formulario = new FormData();
+  formulario.append('archivo', archivo);
+  return pedir('/api/carga-manual/validar', { metodo: 'POST', formulario });
+}
+
+// POST /api/carga-manual/confirmar { id_carga } → { guardadas, descartadas }
+export const confirmarCarga = (idCarga) =>
+  pedir('/api/carga-manual/confirmar', { metodo: 'POST', cuerpo: { id_carga: idCarga } });
 
 // ---------- Consola de operación (solo admin) ----------
 export const consola = {

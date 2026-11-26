@@ -8,6 +8,7 @@ import { montarGrafico } from './ui/grafico.js';
 import { montarConsola } from './ui/consola.js';
 import { montarFormularioIncidente, montarIncidentes } from './ui/incidentes.js';
 import { exportarCsv, montarExportador } from './ui/exportar.js';
+import { montarCargaManual } from './ui/carga.js';
 import { hora } from './ui/formato.js';
 
 const $ = (sel) => document.querySelector(sel);
@@ -99,6 +100,11 @@ async function iniciar() {
   if (exporta && incidentes) {
     montarExportador({ boton: $('#exportar-incidentes'), proveedor, recurso: 'incidentes', titulo: 'Exportar incidentes',
       sedes: Object.keys(usuario.vista), ahora: () => new Date(), dias: 30 });
+  }
+
+  // Carga manual por contingencia (admin, jefatura, prevención).
+  if (tienePermiso('carga_manual') && proveedor.validarCarga) {
+    montarCargaManual({ boton: $('#btn-carga'), proveedor, sedes: Object.keys(usuario.vista) });
   }
 
   const consola = tienePermiso('consola') && proveedor.consola
